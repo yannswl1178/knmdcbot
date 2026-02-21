@@ -504,6 +504,9 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
         except (ValueError, TypeError):
             pass
 
+        # 獲取負責人當前餘額
+        current_balance = balance_data.get(self.claimed_by_id, 0.0) if self.claimed_by_id else 0.0
+
         payout_embed = discord.Embed(
             title="✅ 撥款完成 | Payout Completed",
             description=(
@@ -516,10 +519,31 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
             ),
             color=discord.Color.green()
         )
+        if self.claimed_by_id and self.claimed_by_id > 0:
+            payout_embed.add_field(name="💰 負責人當前餘額", value=f"**{current_balance:.2f}**", inline=False)
         if self.payout_note.value:
             payout_embed.add_field(name="📝 備註", value=self.payout_note.value, inline=False)
 
         await interaction.response.send_message(embed=payout_embed)
+
+        # 撥款後禁用原始訊息的按鈕（變灰色）
+        try:
+            original_msg = interaction.message
+            if original_msg:
+                disabled_view = discord.ui.View(timeout=None)
+                for item in original_msg.components:
+                    for component in item.children:
+                        btn = discord.ui.Button(
+                            label=component.label,
+                            style=component.style,
+                            custom_id=component.custom_id,
+                            disabled=True,
+                            emoji=component.emoji
+                        )
+                        disabled_view.add_item(btn)
+                await original_msg.edit(view=disabled_view)
+        except Exception as e:
+            print(f"⚠️ 禁用撥款按鈕失敗: {e}")
 
 
 class PayoutView(discord.ui.View):
