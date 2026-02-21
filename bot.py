@@ -1109,8 +1109,16 @@ async def on_ready():
     bot.add_view(AdminTicketView())
 
     try:
-        synced = await bot.tree.sync()
-        print(f"🔄 已同步 {len(synced)} 個斜線命令")
+        # 全域同步
+        global_synced = await bot.tree.sync()
+        print(f"🔄 已全域同步 {len(global_synced)} 個斜線命令")
+        # 對每個伺服器也同步一次，確保命令立即出現
+        for guild in bot.guilds:
+            try:
+                guild_synced = await bot.tree.sync(guild=guild)
+                print(f"🔄 已同步 {len(guild_synced)} 個命令到伺服器: {guild.name}")
+            except Exception as ge:
+                print(f"⚠️ 同步到 {guild.name} 失敗: {ge}")
     except Exception as e:
         print(f"❌ 同步命令失敗: {e}")
 
@@ -1685,13 +1693,13 @@ async def refresh_bot(interaction: discord.Interaction):
     try:
         # 重新註冊持久化 View
         bot.add_view(ProductSelectView())
-        bot.add_view(SupportButtonView())
-        bot.add_view(VIPButtonView())
-        bot.add_view(TicketControlView())
-        bot.add_view(VIPTicketControlView())
-        bot.add_view(CloseConfirmView())
-        bot.add_view(VIPCloseConfirmView())
-        bot.add_view(AdminClaimView())
+        bot.add_view(PriorityTicketView())
+        bot.add_view(VipPriorityTicketView())
+        bot.add_view(TicketReasonView())
+        bot.add_view(VipTicketReasonView())
+        bot.add_view(CloseTicketView())
+        bot.add_view(ClaimTicketView())
+        bot.add_view(AdminTicketView())
 
         # 同步命令
         synced = await bot.tree.sync(guild=interaction.guild)
