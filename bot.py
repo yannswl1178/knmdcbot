@@ -4,6 +4,7 @@ from discord import app_commands
 import os
 import datetime
 import asyncio
+import io
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,6 +49,11 @@ VIP_LOG_CHANNEL_ID = 1474799482750369792        # 結單頻道
 # ============================================================
 SETTLEMENT_CATEGORY_ID = 1474802616109367596    # 結算類別
 AGENT_LOG_CHANNEL_ID = 1474802583444127876      # 代理結單頻道
+
+# ============================================================
+# 餘額頻道 ID（使用 /setup-balance-channel 設定）
+# ============================================================
+BALANCE_CHANNEL_ID = 0  # 預設為 0，使用命令設定
 
 # ============================================================
 # 商品列表 - 可自行新增/修改商品
@@ -140,10 +146,14 @@ TICKET_REASONS = [
 ]
 
 # ============================================================
-# 內存存儲（工單資訊）
+# 內存存儲
 # ============================================================
-# 格式: { channel_id: { "price": str, "claimed_by": member_id, "claimed_name": str, ... } }
+# 工單資料: { channel_id: { ... } }
 ticket_data = {}
+# 餘額資料: { user_id: float }
+balance_data = {}
+# 已結單的頻道集合（防止重複結單）
+closed_tickets = set()
 
 # ============================================================
 # Bot 初始化
@@ -161,27 +171,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================
 
 def has_role(member: discord.Member, role_id: int) -> bool:
-    """檢查成員是否擁有指定身分組"""
     return any(role.id == role_id for role in member.roles)
 
-
 def is_admin(member: discord.Member) -> bool:
-    """檢查是否為管理員"""
     return has_role(member, ADMIN_ROLE_ID)
 
-
 def is_boss(member: discord.Member) -> bool:
-    """檢查是否為老闆"""
     return has_role(member, BOSS_ROLE_ID)
 
-
 def is_vip_buyer(member: discord.Member) -> bool:
-    """檢查是否為 VIP Buyer"""
     return has_role(member, VIP_BUYER_ROLE_ID)
 
-
 def get_ticket_data(channel_id: int) -> dict:
-    """獲取工單資料"""
     if channel_id not in ticket_data:
         ticket_data[channel_id] = {
             "price": None,
@@ -191,14 +192,20 @@ def get_ticket_data(channel_id: int) -> dict:
             "ticket_info": "未知",
             "owner_id": None,
             "log_channel_id": None,
+            "is_vip": False,
         }
     return ticket_data[channel_id]
 
 
+# ============================================================
+# 結單記錄保存（簡潔格式：Embed + txt 附件，如圖三）
+# ============================================================
+
 async def save_transcript(channel: discord.TextChannel, log_channel: discord.TextChannel,
                           ticket_owner: discord.Member, ticket_type: str, ticket_info: str,
-                          price: str = None, claimed_by_name: str = None):
-    """保存聊天記錄到結單頻道"""
+                          price: str = None, claimed_by_name: str = None,
+                          closer: discord.Member = None):
+    """保存聊天記錄到結單頻道 - 簡潔 Embed + txt 附件格式"""
     messages = []
     async for msg in channel.history(limit=500, oldest_first=True):
         messages.append(msg)
@@ -206,44 +213,14 @@ async def save_transcript(channel: discord.TextChannel, log_channel: discord.Tex
     if not messages:
         return
 
-    # 建立記錄嵌入
-    transcript_embed = discord.Embed(
-        title="📋 工單記錄 | Ticket Transcript",
-        color=discord.Color.gold(),
-        timestamp=datetime.datetime.now(datetime.timezone.utc)
-    )
-    transcript_embed.add_field(name="📌 工單類型 | Ticket Type", value=ticket_type, inline=True)
-    transcript_embed.add_field(name="👤 開單者 | Opened By", value=f"{ticket_owner.mention} ({ticket_owner})", inline=True)
-    transcript_embed.add_field(name="📝 開單選擇 | Selection", value=ticket_info, inline=False)
-
-    # 顯示負責人
-    if claimed_by_name:
-        transcript_embed.add_field(name="👨‍💼 負責人 | Claimed By", value=claimed_by_name, inline=True)
-    else:
-        transcript_embed.add_field(name="👨‍💼 負責人 | Claimed By", value="無人認領", inline=True)
-
-    # 特別註明金額
-    if price:
-        transcript_embed.add_field(name="💰 訂單金額 | Order Price", value=f"**{price}**", inline=True)
-    else:
-        transcript_embed.add_field(name="💰 訂單金額 | Order Price", value="未設定", inline=True)
-
-    transcript_embed.add_field(name="🔢 訊息數量 | Messages", value=str(len(messages)), inline=True)
-    transcript_embed.add_field(name="📅 開單時間 | Opened", value=f"<t:{int(messages[0].created_at.timestamp())}:F>", inline=True)
-    transcript_embed.add_field(name="📅 結單時間 | Closed", value=f"<t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>", inline=True)
-    transcript_embed.set_footer(text=f"頻道: {channel.name}")
-
-    await log_channel.send(embed=transcript_embed)
-
-    # 分批發送聊天記錄
-    chat_log = ""
-    batch_count = 0
+    # 建立聊天記錄 txt 文件
+    chat_lines = []
     for msg in messages:
         timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
         content = msg.content if msg.content else "[嵌入訊息/附件]"
         if msg.attachments:
             attachments_text = " | ".join([att.url for att in msg.attachments])
-            content += f"\n📎 附件: {attachments_text}"
+            content += f"\n  附件: {attachments_text}"
         if msg.embeds and not msg.content:
             embed_texts = []
             for emb in msg.embeds:
@@ -252,36 +229,58 @@ async def save_transcript(channel: discord.TextChannel, log_channel: discord.Tex
                 if emb.description:
                     embed_texts.append(emb.description[:100])
             content = " | ".join(embed_texts) if embed_texts else "[嵌入訊息]"
+        chat_lines.append(f"[{timestamp}] {msg.author}: {content}")
 
-        line = f"[{timestamp}] {msg.author}: {content}\n"
+    chat_text = "\n".join(chat_lines)
 
-        if len(chat_log) + len(line) > 3900:
-            batch_count += 1
-            log_embed = discord.Embed(
-                title=f"💬 聊天記錄 (第 {batch_count} 部分)",
-                description=f"```\n{chat_log}\n```",
-                color=discord.Color.blue()
-            )
-            await log_channel.send(embed=log_embed)
-            chat_log = line
-        else:
-            chat_log += line
-
-    if chat_log:
-        batch_count += 1
-        log_embed = discord.Embed(
-            title=f"💬 聊天記錄 (第 {batch_count} 部分)" if batch_count > 0 else "💬 聊天記錄",
-            description=f"```\n{chat_log}\n```",
-            color=discord.Color.blue()
-        )
-        await log_channel.send(embed=log_embed)
-
-    # 發送分隔線
-    separator_embed = discord.Embed(
-        description="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        color=discord.Color.dark_grey()
+    # 建立 txt 附件
+    file_bytes = chat_text.encode("utf-8")
+    txt_file = discord.File(
+        io.BytesIO(file_bytes),
+        filename=f"{channel.name}-log.txt"
     )
-    await log_channel.send(embed=separator_embed)
+
+    # 建立簡潔的 Embed（類似圖三的樣式）
+    open_time = messages[0].created_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    transcript_embed = discord.Embed(
+        title=f"📋 票單 #{channel.name} 聊天記錄",
+        color=discord.Color.purple()
+    )
+
+    transcript_embed.add_field(
+        name="",
+        value=f"**開單者：**{ticket_owner.mention} (<@{ticket_owner.id}>)",
+        inline=False
+    )
+
+    if claimed_by_name:
+        transcript_embed.add_field(
+            name="",
+            value=f"**負責人：**{claimed_by_name}",
+            inline=False
+        )
+    else:
+        transcript_embed.add_field(
+            name="",
+            value="**負責人：**❌ 無人認領",
+            inline=False
+        )
+
+    if closer:
+        transcript_embed.add_field(
+            name="",
+            value=f"**結單者：**{closer.mention} (<@{closer.id}>)",
+            inline=False
+        )
+
+    transcript_embed.add_field(
+        name="",
+        value=f"**開單時間：**{open_time}",
+        inline=False
+    )
+
+    await log_channel.send(embed=transcript_embed, file=txt_file)
 
 
 async def send_to_agent_log(guild: discord.Guild, channel: discord.TextChannel,
@@ -292,7 +291,8 @@ async def send_to_agent_log(guild: discord.Guild, channel: discord.TextChannel,
     if not agent_log:
         return
 
-    # 建立代理結算嵌入
+    now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+
     agent_embed = discord.Embed(
         title="💼 代理結算單 | Agent Settlement",
         description="此工單已結單，以下為結算資訊。老闆可進行撥款分潤操作。",
@@ -313,15 +313,13 @@ async def send_to_agent_log(guild: discord.Guild, channel: discord.TextChannel,
     else:
         agent_embed.add_field(name="💰 訂單金額", value="未設定", inline=True)
 
-    agent_embed.add_field(name="📅 結單時間", value=f"<t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>", inline=True)
+    agent_embed.add_field(name="📅 結單時間", value=f"<t:{now_ts}:F>", inline=True)
     agent_embed.add_field(name="🏷️ 原頻道名稱", value=f"`{channel.name}`", inline=True)
     agent_embed.set_footer(text="請老闆確認後進行撥款分潤")
 
-    # 取得工單資料中的 claimed_by ID
     data = ticket_data.get(channel.id, {})
     claimed_by_id = data.get("claimed_by")
 
-    # 發送帶有撥款按鈕的訊息
     payout_view = PayoutView(
         ticket_owner_id=ticket_owner.id,
         ticket_owner_name=str(ticket_owner),
@@ -336,14 +334,13 @@ async def send_to_agent_log(guild: discord.Guild, channel: discord.TextChannel,
 
 
 # ============================================================
-# 設定金額 Modal（彈出輸入框）
+# 設定金額 Modal（僅 VIP 工單使用）
 # ============================================================
 
 class SetPriceModal(discord.ui.Modal, title="💰 設定訂單金額 | Set Order Price"):
-    """管理員輸入此單金額的彈出視窗"""
     price_input = discord.ui.TextInput(
         label="訂單金額 (Order Price)",
-        placeholder="例如: $19.99 或 19.99 USD",
+        placeholder="例如: 5000台幣 或 $19.99 USD",
         style=discord.TextStyle.short,
         required=True,
         max_length=50
@@ -356,8 +353,6 @@ class SetPriceModal(discord.ui.Modal, title="💰 設定訂單金額 | Set Order
 
         channel = interaction.channel
         price_value = self.price_input.value
-
-        # 存儲金額到工單資料
         data = get_ticket_data(channel.id)
         data["price"] = price_value
 
@@ -374,11 +369,10 @@ class SetPriceModal(discord.ui.Modal, title="💰 設定訂單金額 | Set Order
 
 
 # ============================================================
-# 管理員操作面板（設定金額按鈕）
+# 管理員操作面板（設定金額按鈕）- 僅 VIP 工單
 # ============================================================
 
 class AdminTicketView(discord.ui.View):
-    """管理員操作面板 - 設定金額"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -396,7 +390,6 @@ class AdminTicketView(discord.ui.View):
 # ============================================================
 
 class ClaimTicketView(discord.ui.View):
-    """員工領單按鈕 - 僅管理員可見"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -416,11 +409,9 @@ class ClaimTicketView(discord.ui.View):
             )
             return
 
-        # 記錄認領資訊
         data["claimed_by"] = interaction.user.id
         data["claimed_name"] = str(interaction.user)
 
-        # 更新嵌入訊息
         claimed_embed = discord.Embed(
             title="📋 此單總負責人",
             description=(
@@ -431,14 +422,12 @@ class ClaimTicketView(discord.ui.View):
         )
         claimed_embed.set_footer(text="此訊息僅管理員可見")
 
-        # 禁用按鈕
         button.disabled = True
         button.label = f"✅ 已由 {interaction.user.display_name} 負責"
         button.style = discord.ButtonStyle.secondary
 
         await interaction.response.edit_message(embed=claimed_embed, view=self)
 
-        # 在頻道中發送通知（所有人可見）
         notify_embed = discord.Embed(
             description=f"👨‍💼 管理員 **{interaction.user.display_name}** 已認領負責此工單。",
             color=discord.Color.green()
@@ -447,14 +436,13 @@ class ClaimTicketView(discord.ui.View):
 
 
 # ============================================================
-# 撥款分潤按鈕（代理結單頻道 - 老闆用）
+# 撥款分潤（代理結單頻道 - 老闆用）
 # ============================================================
 
 class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
-    """老闆輸入撥款金額"""
     payout_amount = discord.ui.TextInput(
         label="撥款金額 (Payout Amount)",
-        placeholder="例如: $5.00 或 5.00 USD",
+        placeholder="例如: 200",
         style=discord.TextStyle.short,
         required=True,
         max_length=50
@@ -467,9 +455,10 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
         max_length=200
     )
 
-    def __init__(self, claimed_by_name: str, price: str, channel_name: str):
+    def __init__(self, claimed_by_name: str, claimed_by_id: int, price: str, channel_name: str):
         super().__init__()
         self.claimed_by_name = claimed_by_name
+        self.claimed_by_id = claimed_by_id
         self.price = price
         self.channel_name = channel_name
 
@@ -477,6 +466,16 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
         if not is_boss(interaction.user):
             await interaction.response.send_message("❌ 僅老闆可進行撥款操作。", ephemeral=True)
             return
+
+        # 更新餘額
+        try:
+            amount = float(self.payout_amount.value.replace("$", "").replace(",", "").strip())
+            if self.claimed_by_id and self.claimed_by_id > 0:
+                if self.claimed_by_id not in balance_data:
+                    balance_data[self.claimed_by_id] = 0.0
+                balance_data[self.claimed_by_id] += amount
+        except (ValueError, TypeError):
+            pass
 
         payout_embed = discord.Embed(
             title="✅ 撥款完成 | Payout Completed",
@@ -497,7 +496,6 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
 
 
 class PayoutView(discord.ui.View):
-    """撥款分潤按鈕 - 老闆用"""
     def __init__(self, ticket_owner_id: int, ticket_owner_name: str,
                  claimed_by_id: int, claimed_by_name: str,
                  price: str, ticket_type: str, ticket_info: str, channel_name: str):
@@ -519,6 +517,7 @@ class PayoutView(discord.ui.View):
 
         modal = PayoutModal(
             claimed_by_name=self.claimed_by_name,
+            claimed_by_id=self.claimed_by_id,
             price=self.price,
             channel_name=self.channel_name
         )
@@ -530,7 +529,6 @@ class PayoutView(discord.ui.View):
             await interaction.response.send_message("❌ 僅老闆身分組可進行此操作。", ephemeral=True)
             return
 
-        # 禁用所有按鈕
         for item in self.children:
             item.disabled = True
 
@@ -550,17 +548,29 @@ class PayoutView(discord.ui.View):
 
 
 # ============================================================
-# 結單按鈕 View（兩次確認）
+# 結單按鈕 View（兩次確認 - 僅管理員可結單，防止重複結單）
 # ============================================================
 
 class CloseTicketView(discord.ui.View):
-    """結單按鈕 - 第一次點擊"""
+    """結單按鈕 - 第一次點擊（僅管理員可操作）"""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="🔒 結單 | Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket_first")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 第一次確認 - 顯示確認按鈕
+        # 僅管理員可結單
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ 僅管理員可進行結單操作。\nOnly admins can close tickets.",
+                ephemeral=True
+            )
+            return
+
+        # 檢查是否已結單
+        if interaction.channel.id in closed_tickets:
+            await interaction.response.send_message("❌ 此工單已經結單，請勿重複操作。", ephemeral=True)
+            return
+
         data = get_ticket_data(interaction.channel.id)
         price_text = f"\n**💰 訂單金額: {data['price']}**" if data.get("price") else ""
         claimed_text = f"\n**👨‍💼 負責人: {data['claimed_name']}**" if data.get("claimed_name") else ""
@@ -581,24 +591,43 @@ class CloseTicketView(discord.ui.View):
 
 
 class ConfirmCloseView(discord.ui.View):
-    """結單確認 - 第二次確認"""
+    """結單確認 - 第二次確認（僅管理員可操作，防止重複結單）"""
     def __init__(self):
         super().__init__(timeout=60)
 
     @discord.ui.button(label="✅ 確認結單 | Confirm Close", style=discord.ButtonStyle.danger, custom_id="close_ticket_confirm")
     async def confirm_close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        # 再次檢查管理員權限
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ 僅管理員可進行結單操作。\nOnly admins can close tickets.",
+                ephemeral=True
+            )
+            return
+
+        # 防止重複結單
+        if interaction.channel.id in closed_tickets:
+            await interaction.response.send_message("❌ 此工單已經結單，請勿重複操作。", ephemeral=True)
+            return
+
+        # 標記為已結單（立即標記防止並發）
+        closed_tickets.add(interaction.channel.id)
+
+        # 禁用所有按鈕防止再次點擊
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
 
         channel = interaction.channel
         guild = interaction.guild
         data = get_ticket_data(channel.id)
 
-        # 確定結單頻道
         log_channel_id = data.get("log_channel_id", PRODUCT_LOG_CHANNEL_ID)
         ticket_type = data.get("ticket_type", "未知")
         ticket_info = data.get("ticket_info", "未知")
         price = data.get("price")
         claimed_by_name = data.get("claimed_name")
+        is_vip = data.get("is_vip", False)
 
         # 從頻道主題解析
         if channel.topic:
@@ -612,9 +641,10 @@ class ConfirmCloseView(discord.ui.View):
                         ticket_info = f"商品: {product['name']} | 價格: {product['description']}"
                 except (IndexError, StopIteration):
                     pass
-            elif "客服工單" in channel.topic:
-                ticket_type = "客服工單 | Support Ticket"
-                log_channel_id = SUPPORT_LOG_CHANNEL_ID
+            elif "VIP工單" in channel.topic:
+                ticket_type = "VIP 客服工單 | VIP Support Ticket"
+                log_channel_id = VIP_LOG_CHANNEL_ID
+                is_vip = True
                 try:
                     reason_label = channel.topic.split("reason:")[1].split("|")[0].strip()
                     reason = next((r for r in TICKET_REASONS if r["label"] == reason_label), None)
@@ -622,9 +652,9 @@ class ConfirmCloseView(discord.ui.View):
                         ticket_info = f"原因: {reason['emoji']} {reason['label']} - {reason['description']}"
                 except (IndexError, StopIteration):
                     pass
-            elif "VIP工單" in channel.topic:
-                ticket_type = "VIP 客服工單 | VIP Support Ticket"
-                log_channel_id = VIP_LOG_CHANNEL_ID
+            elif "客服工單" in channel.topic:
+                ticket_type = "客服工單 | Support Ticket"
+                log_channel_id = SUPPORT_LOG_CHANNEL_ID
                 try:
                     reason_label = channel.topic.split("reason:")[1].split("|")[0].strip()
                     reason = next((r for r in TICKET_REASONS if r["label"] == reason_label), None)
@@ -636,6 +666,7 @@ class ConfirmCloseView(discord.ui.View):
         log_channel = guild.get_channel(log_channel_id)
         if not log_channel:
             await interaction.followup.send("❌ 找不到結單頻道，請聯繫管理員。", ephemeral=True)
+            closed_tickets.discard(channel.id)
             return
 
         # 發送結單中提示
@@ -657,52 +688,43 @@ class ConfirmCloseView(discord.ui.View):
             except (ValueError, IndexError):
                 pass
 
-        # 保存聊天記錄到結單頻道
+        # 保存聊天記錄到結單頻道（簡潔格式：Embed + txt 附件）
         await save_transcript(channel, log_channel, ticket_owner, ticket_type, ticket_info,
-                              price=price, claimed_by_name=claimed_by_name)
+                              price=price, claimed_by_name=claimed_by_name,
+                              closer=interaction.user)
 
-        # 發送結單通知到結單頻道
-        close_notify = discord.Embed(
-            title="🔒 工單已結單 | Ticket Closed",
-            description=f"工單 `{channel.name}` 已由 {interaction.user.mention} 結單。",
-            color=discord.Color.red(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        if price:
-            close_notify.add_field(name="💰 訂單金額", value=f"**{price}**", inline=True)
-        if claimed_by_name:
-            close_notify.add_field(name="👨‍💼 負責人", value=claimed_by_name, inline=True)
-        await log_channel.send(embed=close_notify)
-
-        # 發送到代理結單頻道（供老闆撥款分潤）
-        await send_to_agent_log(guild, channel, ticket_owner, ticket_type, ticket_info,
-                                price=price, claimed_by_name=claimed_by_name)
+        # 僅 VIP 工單才發送到代理結單頻道
+        if is_vip:
+            await send_to_agent_log(guild, channel, ticket_owner, ticket_type, ticket_info,
+                                    price=price, claimed_by_name=claimed_by_name)
 
         # 清理內存
         if channel.id in ticket_data:
             del ticket_data[channel.id]
 
-        # 等待後刪除頻道
         await asyncio.sleep(3)
         await channel.delete(reason=f"工單結單 by {interaction.user}")
 
     @discord.ui.button(label="❌ 取消 | Cancel", style=discord.ButtonStyle.secondary, custom_id="close_ticket_cancel")
     async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("✅ 已取消結單。| Close cancelled.", ephemeral=True)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("✅ 已取消結單。| Close cancelled.", ephemeral=True)
         self.stop()
 
 
 # ============================================================
-# 開單後發送管理員專用訊息（領單 + 設定金額）
+# 開單後發送管理員專用訊息
 # ============================================================
 
-async def send_admin_panel(channel: discord.TextChannel, guild: discord.Guild):
-    """在開單頻道發送僅管理員可見的操作面板"""
+async def send_admin_panel(channel: discord.TextChannel, guild: discord.Guild, is_vip_ticket: bool = False):
+    """在開單頻道發送管理員操作面板"""
     admin_role = guild.get_role(ADMIN_ROLE_ID)
     if not admin_role:
         return
 
-    # 發送領單訊息（@管理員，僅管理員可見的效果透過提及實現）
+    # 發送領單訊息（@管理員）
     claim_embed = discord.Embed(
         title="📋 此單總負責人",
         description=(
@@ -722,20 +744,21 @@ async def send_admin_panel(channel: discord.TextChannel, guild: discord.Guild):
         view=claim_view
     )
 
-    # 發送管理員操作面板（設定金額）
-    admin_embed = discord.Embed(
-        title="⚙️ 管理員操作面板 | Admin Panel",
-        description=(
-            "**僅管理員可使用以下功能：**\n\n"
-            "💰 **設定金額** - 設定此工單的訂單金額\n"
-            "（結單時金額將被記錄到結單區和代理結單頻道）"
-        ),
-        color=discord.Color.blurple()
-    )
-    admin_embed.set_footer(text="僅管理員可操作")
+    # 僅 VIP 工單才顯示設定金額按鈕和提示
+    if is_vip_ticket:
+        admin_embed = discord.Embed(
+            title="⚙️ 管理員操作面板 | Admin Panel",
+            description=(
+                "**僅管理員可使用以下功能：**\n\n"
+                "💰 **設定金額** - 設定此工單的訂單金額\n"
+                "（結單時金額將被記錄到結單區和代理結單頻道）"
+            ),
+            color=discord.Color.blurple()
+        )
+        admin_embed.set_footer(text="僅管理員可操作")
 
-    admin_view = AdminTicketView()
-    await channel.send(embed=admin_embed, view=admin_view)
+        admin_view = AdminTicketView()
+        await channel.send(embed=admin_embed, view=admin_view)
 
 
 # ============================================================
@@ -743,7 +766,6 @@ async def send_admin_panel(channel: discord.TextChannel, guild: discord.Guild):
 # ============================================================
 
 class ProductSelectMenu(discord.ui.Select):
-    """商品選擇下拉選單"""
     def __init__(self):
         options = []
         for product in PRODUCTS:
@@ -778,7 +800,6 @@ class ProductSelectMenu(discord.ui.Select):
             await interaction.response.send_message("❌ 找不到開單類別，請聯繫管理員。", ephemeral=True)
             return
 
-        # 檢查是否已有開單
         existing = discord.utils.get(
             guild.text_channels,
             name=f"order-{interaction.user.name.lower().replace(' ', '-')}"
@@ -792,32 +813,23 @@ class ProductSelectMenu(discord.ui.Select):
 
         await interaction.response.defer(ephemeral=True)
 
-        # 取得管理員身分組
         admin_role = guild.get_role(ADMIN_ROLE_ID)
 
-        # 建立私人頻道（管理員也可看到）
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                attach_files=True,
-                embed_links=True
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
             ),
             guild.me: discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                manage_channels=True,
-                manage_messages=True
+                read_messages=True, send_messages=True,
+                manage_channels=True, manage_messages=True
             )
         }
-        # 管理員可看到頻道
         if admin_role:
             overwrites[admin_role] = discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                attach_files=True,
-                embed_links=True
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
             )
 
         ticket_channel = await guild.create_text_channel(
@@ -827,19 +839,18 @@ class ProductSelectMenu(discord.ui.Select):
             topic=f"owner:{interaction.user.id} | product:{selected_name} | 商品購買工單"
         )
 
-        # 初始化工單資料
+        # 正常開單：is_vip = False，不需要設定金額
         data = get_ticket_data(ticket_channel.id)
         data["ticket_type"] = "商品購買 | Product Order"
         data["ticket_info"] = f"商品: {product['name']} | 價格: {product['description']}"
         data["owner_id"] = interaction.user.id
         data["log_channel_id"] = PRODUCT_LOG_CHANNEL_ID
+        data["is_vip"] = False
 
-        # 建立價格表
         price_text = "\n".join([f"• **{period}**: {price}" for period, price in product["prices"].items()])
 
-        # 發送開單訊息
         ticket_embed = discord.Embed(
-            title=f"🛒 商品購買工單 | Product Order",
+            title="🛒 商品購買工單 | Product Order",
             description=(
                 f"歡迎 {interaction.user.mention}！\n\n"
                 f"你選擇了以下商品：\n"
@@ -860,14 +871,12 @@ class ProductSelectMenu(discord.ui.Select):
         )
         ticket_embed.set_footer(text=f"工單 ID: {ticket_channel.id}")
 
-        # 結單按鈕
         close_view = CloseTicketView()
         await ticket_channel.send(embed=ticket_embed, view=close_view)
 
-        # 發送管理員專用面板（領單 + 設定金額）
-        await send_admin_panel(ticket_channel, guild)
+        # 正常開單：不含設定金額按鈕（is_vip_ticket=False）
+        await send_admin_panel(ticket_channel, guild, is_vip_ticket=False)
 
-        # 回覆用戶
         await interaction.followup.send(
             f"✅ 已為您開單！請前往 {ticket_channel.mention} 查看。",
             ephemeral=True
@@ -875,18 +884,16 @@ class ProductSelectMenu(discord.ui.Select):
 
 
 class ProductSelectView(discord.ui.View):
-    """商品選擇面板 View"""
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(ProductSelectMenu())
 
 
 # ============================================================
-# 系統二：客服工單系統（一般）
+# 系統二：客服工單系統（一般 + VIP）
 # ============================================================
 
 class TicketReasonSelect(discord.ui.Select):
-    """工單原因選擇下拉選單"""
     def __init__(self, is_vip: bool = False):
         self.is_vip = is_vip
         options = []
@@ -918,7 +925,6 @@ class TicketReasonSelect(discord.ui.Select):
 
         guild = interaction.guild
 
-        # 根據是否 VIP 選擇不同的類別和頻道
         if self.is_vip:
             category_id = VIP_CATEGORY_ID
             log_channel_id = VIP_LOG_CHANNEL_ID
@@ -937,7 +943,6 @@ class TicketReasonSelect(discord.ui.Select):
             await interaction.response.send_message("❌ 找不到開單類別，請聯繫管理員。", ephemeral=True)
             return
 
-        # 檢查是否已有開單
         existing = discord.utils.get(
             guild.text_channels,
             name=f"{channel_prefix}-{interaction.user.name.lower().replace(' ', '-')}"
@@ -953,28 +958,21 @@ class TicketReasonSelect(discord.ui.Select):
 
         admin_role = guild.get_role(ADMIN_ROLE_ID)
 
-        # 建立私人頻道
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                attach_files=True,
-                embed_links=True
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
             ),
             guild.me: discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                manage_channels=True,
-                manage_messages=True
+                read_messages=True, send_messages=True,
+                manage_channels=True, manage_messages=True
             )
         }
         if admin_role:
             overwrites[admin_role] = discord.PermissionOverwrite(
-                read_messages=True,
-                send_messages=True,
-                attach_files=True,
-                embed_links=True
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
             )
 
         ticket_channel = await guild.create_text_channel(
@@ -984,14 +982,13 @@ class TicketReasonSelect(discord.ui.Select):
             topic=f"owner:{interaction.user.id} | reason:{reason['label']} | {topic_suffix}"
         )
 
-        # 初始化工單資料
         data = get_ticket_data(ticket_channel.id)
         data["ticket_type"] = ticket_type
         data["ticket_info"] = f"原因: {reason['emoji']} {reason['label']} - {reason['description']}"
         data["owner_id"] = interaction.user.id
         data["log_channel_id"] = log_channel_id
+        data["is_vip"] = self.is_vip
 
-        # 根據原因生成不同的描述
         reason_descriptions = {
             "buy": "我們的工作人員將協助您完成購買流程。\nOur staff will assist you with the purchase process.",
             "support": "請描述您遇到的技術問題，我們將盡快為您解決。\nPlease describe the technical issue you're experiencing.",
@@ -1019,12 +1016,11 @@ class TicketReasonSelect(discord.ui.Select):
         )
         ticket_embed.set_footer(text=f"工單 ID: {ticket_channel.id}")
 
-        # 結單按鈕
         close_view = CloseTicketView()
         await ticket_channel.send(embed=ticket_embed, view=close_view)
 
-        # 發送管理員專用面板（領單 + 設定金額）
-        await send_admin_panel(ticket_channel, guild)
+        # VIP 工單含設定金額，一般工單不含
+        await send_admin_panel(ticket_channel, guild, is_vip_ticket=self.is_vip)
 
         await interaction.followup.send(
             f"✅ 已為您開單！請前往 {ticket_channel.mention} 查看。",
@@ -1033,21 +1029,18 @@ class TicketReasonSelect(discord.ui.Select):
 
 
 class TicketReasonView(discord.ui.View):
-    """工單原因選擇 View（一般）"""
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketReasonSelect(is_vip=False))
 
 
 class VipTicketReasonView(discord.ui.View):
-    """VIP 工單原因選擇 View"""
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketReasonSelect(is_vip=True))
 
 
 class PriorityTicketView(discord.ui.View):
-    """Priority Ticket 按鈕 View（一般客服）"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -1068,7 +1061,6 @@ class PriorityTicketView(discord.ui.View):
 
 
 class VipPriorityTicketView(discord.ui.View):
-    """VIP Priority Ticket 按鈕 View（VIP 專用）"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -1079,7 +1071,6 @@ class VipPriorityTicketView(discord.ui.View):
         custom_id="vip_priority_ticket_btn"
     )
     async def vip_priority_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 檢查是否有 VIP Buyer 身分組
         if not is_vip_buyer(interaction.user):
             await interaction.response.send_message(
                 "❌ 此功能僅限 **VIP Buyer** 身分組使用。\n"
@@ -1106,7 +1097,6 @@ async def on_ready():
     print(f"✅ Bot 已上線: {bot.user} (ID: {bot.user.id})")
     print(f"📊 伺服器數量: {len(bot.guilds)}")
 
-    # 註冊持久化 View
     bot.add_view(ProductSelectView())
     bot.add_view(PriorityTicketView())
     bot.add_view(VipPriorityTicketView())
@@ -1116,7 +1106,6 @@ async def on_ready():
     bot.add_view(ClaimTicketView())
     bot.add_view(AdminTicketView())
 
-    # 同步斜線命令
     try:
         synced = await bot.tree.sync()
         print(f"🔄 已同步 {len(synced)} 個斜線命令")
@@ -1125,9 +1114,6 @@ async def on_ready():
 
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("Bot 已準備就緒！")
-    print(f"管理員身分組 ID: {ADMIN_ROLE_ID}")
-    print(f"老闆身分組 ID: {BOSS_ROLE_ID}")
-    print(f"VIP Buyer 身分組 ID: {VIP_BUYER_ROLE_ID}")
 
 
 # ============================================================
@@ -1136,21 +1122,19 @@ async def on_ready():
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    """處理持久化按鈕的交互（備用）"""
     if interaction.type != discord.InteractionType.component:
         return
 
     custom_id = interaction.data.get("custom_id", "")
 
-    # 撥款按鈕需要特殊處理（因為帶有動態參數）
     if custom_id == "payout_btn":
         if not is_boss(interaction.user):
             await interaction.response.send_message("❌ 僅老闆身分組可進行撥款操作。", ephemeral=True)
             return
-        # 從訊息嵌入中解析資訊
         msg = interaction.message
         channel_name = "未知"
         claimed_by_name = "未知"
+        claimed_by_id = 0
         price = "未設定"
         if msg.embeds:
             emb = msg.embeds[0]
@@ -1163,6 +1147,7 @@ async def on_interaction(interaction: discord.Interaction):
                     channel_name = field.value.replace("`", "")
         modal = PayoutModal(
             claimed_by_name=claimed_by_name,
+            claimed_by_id=claimed_by_id,
             price=price,
             channel_name=channel_name
         )
@@ -1173,7 +1158,6 @@ async def on_interaction(interaction: discord.Interaction):
         if not is_boss(interaction.user):
             await interaction.response.send_message("❌ 僅老闆身分組可進行此操作。", ephemeral=True)
             return
-        # 從訊息嵌入中解析資訊
         msg = interaction.message
         channel_name = "未知"
         ticket_owner_name = "未知"
@@ -1191,7 +1175,6 @@ async def on_interaction(interaction: discord.Interaction):
                 elif "頻道" in field.name:
                     channel_name = field.value.replace("`", "")
 
-        # 禁用按鈕
         view = discord.ui.View(timeout=None)
         for item in msg.components:
             for child in item.children:
@@ -1223,10 +1206,17 @@ async def on_interaction(interaction: discord.Interaction):
 # 斜線命令：設置面板
 # ============================================================
 
+# ============================================================
+# 【如何修改介紹文字】
+# 修改下方 setup_product 函數中 embed 的 title 和 description
+# title = 面板標題（如 "🛒 Product Catalog"）
+# description = 面板內容（支持 Markdown 格式）
+# footer = 底部文字（如 "RobloxCheatz | Premium Gaming Tools"）
+# ============================================================
+
 @bot.tree.command(name="setup-product", description="設置商品目錄面板 | Setup Product Catalog Panel")
 @app_commands.default_permissions(administrator=True)
 async def setup_product(interaction: discord.Interaction):
-    """在商品開單頻道發送商品目錄面板"""
     if interaction.channel_id != PRODUCT_PANEL_CHANNEL_ID:
         await interaction.response.send_message(
             f"❌ 請在 <#{PRODUCT_PANEL_CHANNEL_ID}> 頻道使用此命令。",
@@ -1234,6 +1224,7 @@ async def setup_product(interaction: discord.Interaction):
         )
         return
 
+    # ====== 修改這裡的文字來更改面板介紹 ======
     embed = discord.Embed(
         title="🛒 Product Catalog",
         description=(
@@ -1252,6 +1243,7 @@ async def setup_product(interaction: discord.Interaction):
         color=discord.Color.purple()
     )
     embed.set_footer(text="RobloxCheatz | Premium Gaming Tools")
+    # ====== 修改結束 ======
 
     view = ProductSelectView()
     await interaction.channel.send(embed=embed, view=view)
@@ -1261,7 +1253,6 @@ async def setup_product(interaction: discord.Interaction):
 @bot.tree.command(name="setup-support", description="設置客服工單面板 | Setup Support Ticket Panel")
 @app_commands.default_permissions(administrator=True)
 async def setup_support(interaction: discord.Interaction):
-    """在客服開單頻道發送客服工單面板"""
     if interaction.channel_id != SUPPORT_PANEL_CHANNEL_ID:
         await interaction.response.send_message(
             f"❌ 請在 <#{SUPPORT_PANEL_CHANNEL_ID}> 頻道使用此命令。",
@@ -1292,7 +1283,6 @@ async def setup_support(interaction: discord.Interaction):
 @bot.tree.command(name="setup-vip", description="設置 VIP 專屬工單面板 | Setup VIP Ticket Panel")
 @app_commands.default_permissions(administrator=True)
 async def setup_vip(interaction: discord.Interaction):
-    """在 VIP 頻道發送 VIP 專屬工單面板（僅 vip-buyer 可見）"""
     if interaction.channel_id != VIP_PANEL_CHANNEL_ID:
         await interaction.response.send_message(
             f"❌ 請在 <#{VIP_PANEL_CHANNEL_ID}> 頻道使用此命令。",
@@ -1333,7 +1323,6 @@ async def setup_vip(interaction: discord.Interaction):
     details="商品詳細說明"
 )
 async def add_product(interaction: discord.Interaction, name: str, emoji: str, description: str, details: str):
-    """動態新增商品"""
     prices = {}
     for item in description.split("|"):
         item = item.strip()
@@ -1365,7 +1354,6 @@ async def add_product(interaction: discord.Interaction, name: str, emoji: str, d
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(name="要移除的商品名稱")
 async def remove_product(interaction: discord.Interaction, name: str):
-    """移除商品"""
     global PRODUCTS
     original_len = len(PRODUCTS)
     PRODUCTS = [p for p in PRODUCTS if p["name"].lower() != name.lower()]
@@ -1379,7 +1367,6 @@ async def remove_product(interaction: discord.Interaction, name: str):
 @bot.tree.command(name="list-products", description="列出所有商品 | List all products")
 @app_commands.default_permissions(administrator=True)
 async def list_products(interaction: discord.Interaction):
-    """列出所有商品"""
     if not PRODUCTS:
         await interaction.response.send_message("📦 目前沒有商品。", ephemeral=True)
         return
@@ -1396,15 +1383,13 @@ async def list_products(interaction: discord.Interaction):
 
 @bot.tree.command(name="set-price", description="設定當前工單金額（僅管理員）| Set ticket price")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(price="訂單金額（如 $19.99）")
+@app_commands.describe(price="訂單金額（如 5000台幣）")
 async def set_price_cmd(interaction: discord.Interaction, price: str):
-    """透過斜線命令設定工單金額"""
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ 僅管理員可使用此命令。", ephemeral=True)
         return
 
     channel = interaction.channel
-    # 檢查是否在工單頻道中
     if not channel.topic or ("工單" not in channel.topic):
         await interaction.response.send_message("❌ 請在工單頻道中使用此命令。", ephemeral=True)
         return
@@ -1424,10 +1409,153 @@ async def set_price_cmd(interaction: discord.Interaction, price: str):
     await interaction.response.send_message(embed=price_embed)
 
 
+# ============================================================
+# 餘額查詢命令
+# ============================================================
+
+@bot.tree.command(name="balance", description="查看自己的餘額 | Check your balance")
+async def check_balance(interaction: discord.Interaction):
+    """查看自己的餘額（僅在餘額頻道可用，僅操作者本人可見）"""
+    if BALANCE_CHANNEL_ID > 0 and interaction.channel_id != BALANCE_CHANNEL_ID:
+        await interaction.response.send_message(
+            f"❌ 請在 <#{BALANCE_CHANNEL_ID}> 頻道使用此命令。",
+            ephemeral=True
+        )
+        return
+
+    if not is_admin(interaction.user) and not is_boss(interaction.user):
+        await interaction.response.send_message("❌ 僅管理員和老闆可使用此命令。", ephemeral=True)
+        return
+
+    user_id = interaction.user.id
+    user_balance = balance_data.get(user_id, 0.0)
+
+    balance_embed = discord.Embed(
+        title="💰 餘額查詢 | Balance Check",
+        description=(
+            f"**用戶:** {interaction.user.mention}\n"
+            f"**當前餘額:** {user_balance:.2f}\n\n"
+            f"查詢時間: <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>"
+        ),
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=balance_embed, ephemeral=True)
+
+
+@bot.tree.command(name="balance-check", description="查看指定用戶或所有人餘額（僅老闆）| Check user balance")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="要查詢餘額的用戶（不填則查看所有人）")
+async def check_user_balance(interaction: discord.Interaction, user: discord.Member = None):
+    if BALANCE_CHANNEL_ID > 0 and interaction.channel_id != BALANCE_CHANNEL_ID:
+        await interaction.response.send_message(
+            f"❌ 請在 <#{BALANCE_CHANNEL_ID}> 頻道使用此命令。",
+            ephemeral=True
+        )
+        return
+
+    if not is_boss(interaction.user):
+        await interaction.response.send_message("❌ 僅老闆身分組可查看他人餘額。", ephemeral=True)
+        return
+
+    if user:
+        user_balance = balance_data.get(user.id, 0.0)
+        balance_embed = discord.Embed(
+            title="💰 用戶餘額查詢 | User Balance",
+            description=(
+                f"**用戶:** {user.mention} ({user})\n"
+                f"**當前餘額:** {user_balance:.2f}\n\n"
+                f"查詢者: {interaction.user.mention}\n"
+                f"查詢時間: <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>"
+            ),
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=balance_embed, ephemeral=True)
+    else:
+        if not balance_data:
+            await interaction.response.send_message("📊 目前沒有任何餘額記錄。", ephemeral=True)
+            return
+
+        balance_embed = discord.Embed(
+            title="💰 所有用戶餘額 | All Balances",
+            color=discord.Color.gold(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+
+        for uid, bal in balance_data.items():
+            member = interaction.guild.get_member(uid)
+            name = str(member) if member else f"用戶 ID: {uid}"
+            balance_embed.add_field(
+                name=name,
+                value=f"💰 {bal:.2f}",
+                inline=True
+            )
+
+        balance_embed.set_footer(text=f"查詢者: {interaction.user}")
+        await interaction.response.send_message(embed=balance_embed, ephemeral=True)
+
+
+@bot.tree.command(name="set-balance", description="設定用戶餘額（僅老闆）| Set user balance")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="目標用戶", amount="餘額金額")
+async def set_balance(interaction: discord.Interaction, user: discord.Member, amount: float):
+    if not is_boss(interaction.user):
+        await interaction.response.send_message("❌ 僅老闆身分組可設定餘額。", ephemeral=True)
+        return
+
+    balance_data[user.id] = amount
+
+    embed = discord.Embed(
+        title="✅ 餘額已設定 | Balance Updated",
+        description=(
+            f"**用戶:** {user.mention}\n"
+            f"**新餘額:** {amount:.2f}\n"
+            f"**設定者:** {interaction.user.mention}\n"
+            f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>"
+        ),
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="setup-balance-channel", description="設定當前頻道為餘額查詢頻道 | Set balance channel")
+@app_commands.default_permissions(administrator=True)
+async def setup_balance_channel(interaction: discord.Interaction):
+    global BALANCE_CHANNEL_ID
+    BALANCE_CHANNEL_ID = interaction.channel_id
+
+    guild = interaction.guild
+    admin_role = guild.get_role(ADMIN_ROLE_ID)
+    boss_role = guild.get_role(BOSS_ROLE_ID)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    }
+    if admin_role:
+        overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    if boss_role:
+        overwrites[boss_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+    await interaction.channel.edit(overwrites=overwrites)
+
+    await interaction.response.send_message(
+        f"✅ 已將此頻道設定為餘額查詢頻道！\n"
+        f"• 頻道: {interaction.channel.mention}\n"
+        f"• 僅管理員和老闆可見此頻道\n"
+        f"• 使用 `/balance` 查看自己的餘額\n"
+        f"• 老闆使用 `/balance-check` 查看所有人餘額\n"
+        f"• 老闆使用 `/set-balance` 設定用戶餘額",
+        ephemeral=True
+    )
+
+
+# ============================================================
+# VIP 頻道權限設置
+# ============================================================
+
 @bot.tree.command(name="setup-vip-permissions", description="設置 VIP 頻道權限（僅 vip-buyer 可見）")
 @app_commands.default_permissions(administrator=True)
 async def setup_vip_permissions(interaction: discord.Interaction):
-    """設置 VIP 頻道權限，使其僅對 vip-buyer 身分組可見"""
     guild = interaction.guild
     vip_role = guild.get_role(VIP_BUYER_ROLE_ID)
     admin_role = guild.get_role(ADMIN_ROLE_ID)
@@ -1436,7 +1564,6 @@ async def setup_vip_permissions(interaction: discord.Interaction):
         await interaction.response.send_message("❌ 找不到 VIP Buyer 身分組。", ephemeral=True)
         return
 
-    # 設置 VIP 面板頻道權限
     vip_panel = guild.get_channel(VIP_PANEL_CHANNEL_ID)
     if vip_panel:
         overwrites = {
@@ -1448,7 +1575,6 @@ async def setup_vip_permissions(interaction: discord.Interaction):
             overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
         await vip_panel.edit(overwrites=overwrites)
 
-    # 設置 VIP 結單頻道權限
     vip_log = guild.get_channel(VIP_LOG_CHANNEL_ID)
     if vip_log:
         overwrites = {
@@ -1459,7 +1585,6 @@ async def setup_vip_permissions(interaction: discord.Interaction):
             overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
         await vip_log.edit(overwrites=overwrites)
 
-    # 設置 VIP 類別權限
     vip_category = guild.get_channel(VIP_CATEGORY_ID)
     if vip_category:
         overwrites = {
