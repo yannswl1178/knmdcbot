@@ -2,9 +2,11 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
+import sys
 import datetime
 import asyncio
 import io
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -1603,6 +1605,108 @@ async def setup_vip_permissions(interaction: discord.Interaction):
         f"• VIP 類別: 僅 {vip_role.mention} 和管理員可見",
         ephemeral=True
     )
+
+
+# ============================================================
+# 管理員命令：重啟 / 同步 / 重整
+# ============================================================
+
+@bot.tree.command(name="restart", description="🔄 重啟機器人（僅管理員）")
+async def restart_bot(interaction: discord.Interaction):
+    """重啟機器人進程，讓 Railway 自動重新啟動載入最新代碼"""
+    admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+    boss_role = interaction.guild.get_role(BOSS_ROLE_ID)
+    has_permission = (
+        (admin_role and admin_role in interaction.user.roles) or
+        (boss_role and boss_role in interaction.user.roles) or
+        interaction.user.guild_permissions.administrator
+    )
+    if not has_permission:
+        await interaction.response.send_message("❌ 僅管理員或老闆可使用此命令。", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        "🔄 **機器人正在重啟中...**\n"
+        "Railway 將自動重新啟動機器人進程，請稍候約 10-30 秒。",
+        ephemeral=True
+    )
+    # 給一點時間讓訊息發送出去
+    await asyncio.sleep(2)
+    # 退出進程，Railway 會自動重啟
+    os._exit(0)
+
+
+@bot.tree.command(name="sync", description="🔄 同步斜線命令（僅管理員）")
+async def sync_commands(interaction: discord.Interaction):
+    """重新同步所有斜線命令到 Discord，讓新命令立即可用"""
+    admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+    boss_role = interaction.guild.get_role(BOSS_ROLE_ID)
+    has_permission = (
+        (admin_role and admin_role in interaction.user.roles) or
+        (boss_role and boss_role in interaction.user.roles) or
+        interaction.user.guild_permissions.administrator
+    )
+    if not has_permission:
+        await interaction.response.send_message("❌ 僅管理員或老闆可使用此命令。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # 同步到當前伺服器
+        synced = await bot.tree.sync(guild=interaction.guild)
+        # 同步全域命令
+        global_synced = await bot.tree.sync()
+        await interaction.followup.send(
+            f"✅ **斜線命令同步完成！**\n"
+            f"• 伺服器命令: {len(synced)} 個\n"
+            f"• 全域命令: {len(global_synced)} 個\n"
+            f"新命令現在應該已經可以使用了。",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ 同步失敗: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="refresh", description="🔄 重整機器人狀態（僅管理員）")
+async def refresh_bot(interaction: discord.Interaction):
+    """重新載入持久化 View 和同步命令，不需要重啟"""
+    admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+    boss_role = interaction.guild.get_role(BOSS_ROLE_ID)
+    has_permission = (
+        (admin_role and admin_role in interaction.user.roles) or
+        (boss_role and boss_role in interaction.user.roles) or
+        interaction.user.guild_permissions.administrator
+    )
+    if not has_permission:
+        await interaction.response.send_message("❌ 僅管理員或老闆可使用此命令。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # 重新註冊持久化 View
+        bot.add_view(ProductSelectView())
+        bot.add_view(SupportButtonView())
+        bot.add_view(VIPButtonView())
+        bot.add_view(TicketControlView())
+        bot.add_view(VIPTicketControlView())
+        bot.add_view(CloseConfirmView())
+        bot.add_view(VIPCloseConfirmView())
+        bot.add_view(AdminClaimView())
+
+        # 同步命令
+        synced = await bot.tree.sync(guild=interaction.guild)
+        global_synced = await bot.tree.sync()
+
+        await interaction.followup.send(
+            f"✅ **機器人狀態已重整！**\n"
+            f"• 持久化 View 已重新載入\n"
+            f"• 伺服器命令: {len(synced)} 個已同步\n"
+            f"• 全域命令: {len(global_synced)} 個已同步\n"
+            f"所有功能現在應該已經正常運作。",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ 重整失敗: {e}", ephemeral=True)
 
 
 # ============================================================
