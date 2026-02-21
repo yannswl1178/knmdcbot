@@ -1,8 +1,2 @@
-# 指定 Python provider，讓 Nixpacks 自動處理 pip 安裝
-providers = ["python"]
-
-[phases.setup]
-nixPkgs = ["...", "python311"]
-
 [start]
 cmd = "python3 bot.py"
