@@ -154,6 +154,29 @@ TICKET_REASONS = [
 ticket_data = {}
 # 餘額資料: { user_id: float }
 balance_data = {}
+
+BALANCE_FILE = "balances.json"
+
+def load_balance_data():
+    """從文件載入餘額資料"""
+    global balance_data
+    try:
+        if os.path.exists(BALANCE_FILE):
+            with open(BALANCE_FILE, "r") as f:
+                raw = json.load(f)
+                balance_data = {int(k): float(v) for k, v in raw.items()}
+                print(f"💰 已載入 {len(balance_data)} 筆餘額資料")
+    except Exception as e:
+        print(f"⚠️ 載入餘額資料失敗: {e}")
+        balance_data = {}
+
+def save_balance_data():
+    """保存餘額資料到文件"""
+    try:
+        with open(BALANCE_FILE, "w") as f:
+            json.dump({str(k): v for k, v in balance_data.items()}, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ 保存餘額資料失敗: {e}")
 # 已結單的頻道集合（防止重複結單）
 closed_tickets = set()
 
@@ -476,6 +499,8 @@ class PayoutModal(discord.ui.Modal, title="💸 撥款分潤 | Payout"):
                 if self.claimed_by_id not in balance_data:
                     balance_data[self.claimed_by_id] = 0.0
                 balance_data[self.claimed_by_id] += amount
+                save_balance_data()
+                print(f"💰 已更新用戶 {self.claimed_by_id} 餘額: +{amount} = {balance_data[self.claimed_by_id]}")
         except (ValueError, TypeError):
             pass
 
@@ -1099,6 +1124,9 @@ async def on_ready():
     print(f"✅ Bot 已上線: {bot.user} (ID: {bot.user.id})")
     print(f"📊 伺服器數量: {len(bot.guilds)}")
 
+    # 載入餘額資料
+    load_balance_data()
+
     bot.add_view(ProductSelectView())
     bot.add_view(PriorityTicketView())
     bot.add_view(VipPriorityTicketView())
@@ -1151,6 +1179,19 @@ async def on_interaction(interaction: discord.Interaction):
             for field in emb.fields:
                 if "負責人" in field.name:
                     claimed_by_name = field.value
+                    # 嘗試從負責人名稱中解析用戶 ID
+                    import re
+                    id_match = re.search(r'<@!?(\d+)>', field.value)
+                    if id_match:
+                        claimed_by_id = int(id_match.group(1))
+                    else:
+                        # 嘗試用名稱在伺服器中查找用戶
+                        clean_name = field.value.strip()
+                        if interaction.guild:
+                            for member in interaction.guild.members:
+                                if str(member) == clean_name or member.display_name == clean_name or member.name == clean_name:
+                                    claimed_by_id = member.id
+                                    break
                 elif "金額" in field.name:
                     price = field.value.replace("**", "")
                 elif "頻道" in field.name:
@@ -1513,6 +1554,7 @@ async def set_balance(interaction: discord.Interaction, user: discord.Member, am
         return
 
     balance_data[user.id] = amount
+    save_balance_data()
 
     embed = discord.Embed(
         title="✅ 餘額已設定 | Balance Updated",
