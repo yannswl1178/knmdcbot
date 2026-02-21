@@ -61,66 +61,16 @@ BALANCE_CHANNEL_ID = 0  # 預設為 0，使用命令設定
 # 商品列表 - 可自行新增/修改商品
 # ============================================================
 PRODUCTS = [
-    {
-        "name": "Seliware",
-        "emoji": "",
-        "display_emoji": "🔷",
-        "description": "3.99$ / week | 9.99$ / month",
-        "prices": {
-            "Weekly": "$3.99",
-            "Monthly": "$9.99"
-        },
-        "details": "Premium Roblox exploit with advanced features."
-    },
-    {
-        "name": "Volt",
-        "emoji": "",
-        "display_emoji": "⚡",
-        "description": "5.99$ / week | 19.99$ / month | 49.99$ / 90 days",
-        "prices": {
-            "Weekly": "$5.99",
-            "Monthly": "$19.99",
-            "90 Days": "$49.99"
-        },
-        "details": "High-performance Roblox tool with premium support."
-    },
-    {
-        "name": "Volcano",
-        "emoji": "",
-        "display_emoji": "🌋",
-        "description": "5.99$ / week | 19.99$ / month",
-        "prices": {
-            "Weekly": "$5.99",
-            "Monthly": "$19.99"
-        },
-        "details": "Powerful Roblox exploit with unique capabilities."
-    },
-    {
-        "name": "Wave",
-        "emoji": "",
-        "display_emoji": "🌊",
-        "description": "2.49$ / day | 5.99$ / week | 18.99$ / month | 39.99$ / 90 days",
-        "prices": {
-            "Daily": "$2.49",
-            "Weekly": "$5.99",
-            "Monthly": "$18.99",
-            "90 Days": "$39.99"
-        },
-        "details": "Versatile Roblox tool with flexible pricing options."
-    },
-    {
-        "name": "Bunni.lol",
-        "emoji": "",
-        "display_emoji": "🐰",
-        "description": "1.00$ / 2 days | 3.00$ / week | 9.99$ / month | 34.99$ / lifetime",
-        "prices": {
-            "2 Days": "$1.00",
-            "Weekly": "$3.00",
-            "Monthly": "$9.99",
-            "Lifetime": "$34.99"
-        },
-        "details": "Affordable Roblox exploit with lifetime option."
-    },
+    # 商品列表已清空，請使用 /add-product 命令新增商品
+    # 範例格式:
+    # {
+    #     "name": "商品名稱",
+    #     "emoji": "",
+    #     "display_emoji": "🔷",
+    #     "description": "價格說明",
+    #     "prices": {"Weekly": "$3.99", "Monthly": "$9.99"},
+    #     "details": "商品詳細說明"
+    # },
 ]
 
 # ============================================================
@@ -744,10 +694,9 @@ class ConfirmCloseView(discord.ui.View):
                               price=price, claimed_by_name=claimed_by_name,
                               closer=interaction.user)
 
-        # 僅 VIP 工單才發送到代理結單頻道
-        if is_vip:
-            await send_to_agent_log(guild, channel, ticket_owner, ticket_type, ticket_info,
-                                    price=price, claimed_by_name=claimed_by_name)
+        # 所有工單結單後都發送到代理結算頻道
+        await send_to_agent_log(guild, channel, ticket_owner, ticket_type, ticket_info,
+                                price=price, claimed_by_name=claimed_by_name)
 
         # 清理內存
         if channel.id in ticket_data:
