@@ -972,8 +972,17 @@ class ProductSelectMenu(discord.ui.Select):
                     emoji=product["display_emoji"]
                 )
             )
+        if not options:
+            options.append(
+                discord.SelectOption(
+                    label="暫無商品",
+                    description="請管理員使用 /add-product 新增商品",
+                    value="__no_product__",
+                    emoji="❌"
+                )
+            )
         super().__init__(
-            placeholder="Select a product to view...",
+            placeholder="選擇商品查看詳情...",
             min_values=1,
             max_values=1,
             options=options,
@@ -982,6 +991,9 @@ class ProductSelectMenu(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         selected_name = self.values[0]
+        if selected_name == "__no_product__":
+            await interaction.response.send_message("❌ 目前沒有商品，請等待管理員新增商品。", ephemeral=True)
+            return
         product = next((p for p in PRODUCTS if p["name"] == selected_name), None)
 
         if not product:
