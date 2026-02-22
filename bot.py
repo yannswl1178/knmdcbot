@@ -1570,23 +1570,21 @@ async def setup_product(interaction: discord.Interaction):
 
     # ====== 修改這裡的文字來更改面板介紹 ======
     embed = discord.Embed(
-        title="🛒 Product Catalog",
+        title="🛒 產品目錄",
         description=(
-            "**Welcome to RobloxCheatz Store!**\n\n"
-            "Browse our premium Roblox tools and exploits.\n"
-            "Select a product from the dropdown menu below\n"
-            "to view detailed pricing and payment options.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "**💳 Accepted Payment Methods:**\n"
-            "• 💳 Card, 🪙 Crypto, CashApp, WeChat\n"
-            "• 🍎 Apple Pay, **G** Google Pay\n"
-            "• 🏦 Bank Transfers, SEPA, AliPay\n"
-            "• 🟡 Binance Pay, 🎮 Robux, 🇷🇺 Funpay\n\n"
-            "🌐 **INSTANT DELIVERY** on website orders!"
+            "**歡迎來到 kny7 商店！**\n\n"
+            "瀏覽我們優質商品及各式服務。\n"
+            "從下方下拉式選單中選擇已有現貨產品\n"
+            "即可查看詳細的價格。\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ━\n\n"
+            "**💳 接受的付款方式：**\n"
+            "• 🪙 加密貨幣、台灣無卡、8591(台版)\n"
+            "• 🏦 銀行轉帳\n"
+            "• 🟡 Binance Pay"
         ),
         color=discord.Color.purple()
     )
-    embed.set_footer(text="RobloxCheatz | Premium Gaming Tools")
+    embed.set_footer(text="kny7 | 高級服務商城(除了直購代儲70%商品都有賣)")
     # ====== 修改結束 ======
 
     view = ProductSelectView()
