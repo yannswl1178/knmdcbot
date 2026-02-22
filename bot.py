@@ -1588,8 +1588,8 @@ async def setup_product(interaction: discord.Interaction):
     # ====== 修改結束 ======
 
     view = ProductSelectView()
-    await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ 商品目錄面板已設置！", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="setup-support", description="設置客服工單面板 | Setup Support Ticket Panel")
@@ -1618,8 +1618,8 @@ async def setup_support(interaction: discord.Interaction):
     embed.set_footer(text="RobloxCheatz | VIP Support")
 
     view = PriorityTicketView()
-    await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ 客服工單面板已設置！", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="setup-vip", description="設置 VIP 專屬工單面板 | Setup VIP Ticket Panel")
@@ -1648,8 +1648,8 @@ async def setup_vip(interaction: discord.Interaction):
     embed.set_footer(text="此頻道僅 VIP Buyer 身分組可見")
 
     view = VipPriorityTicketView()
-    await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ VIP 工單面板已設置！", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="setup-inquiry", description="設置洽群開單面板 | Setup Inquiry Ticket Panel")
@@ -1677,8 +1677,8 @@ async def setup_inquiry(interaction: discord.Interaction):
     embed.set_footer(text="洽群開單系統")
 
     view = InquiryTicketView()
-    await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ 洽群開單面板已設置！", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=view)
 
 
 # ============================================================
