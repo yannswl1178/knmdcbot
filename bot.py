@@ -1696,7 +1696,7 @@ async def setup_inquiry(interaction: discord.Interaction):
     details="商品詳細說明",
     employee_profit="員工收益(TWD)，結單後自動撥款至負責人帳號"
 )
-async def add_product(interaction: discord.Interaction, name: str, emoji: str, description: str, details: str, employee_profit: float = 0):
+async def add_product(interaction: discord.Interaction, name: str, emoji: str, description: str, details: str, employee_profit: float = 0.0):
     prices = {}
     for item in description.split("|"):
         item = item.strip()
