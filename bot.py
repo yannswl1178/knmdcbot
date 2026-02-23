@@ -1762,7 +1762,7 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 ephemeral=False
             )
 
-        # 雙方都確認 → 進入規則同意階段
+        # 雙方都確認 → 進入金額輸入階段
         if data["buyer_confirmed_role"] and data["seller_confirmed_role"]:
             for child in self.children:
                 child.disabled = True
@@ -1770,8 +1770,8 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 await interaction.message.edit(view=self)
             except Exception:
                 pass
-            data["phase"] = "rules_agree"
-            await self._proceed_to_rules(interaction.channel, data)
+            data["phase"] = "amount_input"
+            await self._proceed_to_amount(interaction.channel, data)
 
     @discord.ui.button(label="❌ 角色不正確", style=discord.ButtonStyle.danger, custom_id="mm_role_confirm_no")
     async def confirm_no(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1816,78 +1816,6 @@ class MiddlemanRoleConfirmView(discord.ui.View):
         role_view = MiddlemanRoleSelectView(interaction.channel.id)
         await interaction.channel.send(embed=role_embed, view=role_view)
 
-    async def _proceed_to_rules(self, channel, data):
-        """進入規則同意階段"""
-        rules_url = "https://ptb.discord.com/channels/1464245186954526793/1475397009837133876"
-        guild = channel.guild
-        buyer = guild.get_member(data["buyer_id"])
-
-        rules_embed = discord.Embed(
-            title="📜 中間商服務規則",
-            description=(
-                f"請雙方閱讀並同意中間商服務規則。\n\n"
-                f"📖 **規則連結:** [點擊查看規則]({rules_url})\n\n"
-                f"**請買家 {buyer.mention if buyer else ''} 先按「✅ 我同意規則」，然後賣家再按。**"
-            ),
-            color=discord.Color.gold()
-        )
-        view = MiddlemanRulesAgreeView(channel.id)
-        await channel.send(embed=rules_embed, view=view)
-
-
-class MiddlemanRulesAgreeView(discord.ui.View):
-    """中間商規則同意按鈕"""
-    def __init__(self, channel_id: int):
-        super().__init__(timeout=None)
-        self.channel_id = channel_id
-
-    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success, custom_id="mm_rules_agree")
-    async def agree_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = middleman_data.get(self.channel_id or interaction.channel.id)
-        if not data:
-            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
-            return
-
-        user_id = interaction.user.id
-
-        if user_id != data["buyer_id"] and user_id != data["seller_id"]:
-            await interaction.response.send_message("❌ 只有買家和賣家可以操作。", ephemeral=True)
-            return
-
-        # 買家先同意
-        if user_id == data["buyer_id"]:
-            if data["buyer_agreed_rules"]:
-                await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
-                return
-            data["buyer_agreed_rules"] = True
-            await interaction.response.send_message(
-                f"✅ 買家 {interaction.user.mention} 已同意規則。等待賣家同意...",
-                ephemeral=False
-            )
-        elif user_id == data["seller_id"]:
-            if not data["buyer_agreed_rules"]:
-                await interaction.response.send_message("❌ 請等待買家先同意規則。", ephemeral=True)
-                return
-            if data["seller_agreed_rules"]:
-                await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
-                return
-            data["seller_agreed_rules"] = True
-            await interaction.response.send_message(
-                f"✅ 賣家 {interaction.user.mention} 已同意規則。",
-                ephemeral=False
-            )
-
-        # 雙方都同意 → 進入金額輸入階段
-        if data["buyer_agreed_rules"] and data["seller_agreed_rules"]:
-            for child in self.children:
-                child.disabled = True
-            try:
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
-            data["phase"] = "amount_input"
-            await self._proceed_to_amount(interaction.channel, data)
-
     async def _proceed_to_amount(self, channel, data):
         """進入金額輸入階段"""
         guild = channel.guild
@@ -1912,6 +1840,123 @@ class MiddlemanRulesAgreeView(discord.ui.View):
             color=discord.Color.blue()
         )
         await channel.send(embed=amount_embed)
+
+
+class MiddlemanBuyerRulesView(discord.ui.View):
+    """中間商規則同意 — 買家規則（先顯示）"""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success, custom_id="mm_buyer_rules_agree")
+    async def buyer_agree(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        if not data:
+            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        if interaction.user.id != data["buyer_id"]:
+            await interaction.response.send_message("❌ 只有買家可以操作此按鈕。", ephemeral=True)
+            return
+
+        if data["buyer_agreed_rules"]:
+            await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
+            return
+
+        data["buyer_agreed_rules"] = True
+
+        # 禁用買家按鈕
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # 現在顯示賣家規則
+        guild = interaction.guild
+        seller = guild.get_member(data["seller_id"])
+        rules_url = "https://ptb.discord.com/channels/1464245186954526793/1475397009837133876"
+
+        seller_rules_embed = discord.Embed(
+            title="📜 賣家服務規則",
+            description=(
+                f"買家已同意規則。\n\n"
+                f"請 **賣家** {seller.mention if seller else ''} 閱讀並同意中間商服務規則。\n\n"
+                f"📖 **規則連結:** [點擊查看規則]({rules_url})\n\n"
+                f"請按下方「✅ 我同意規則」按鈕。"
+            ),
+            color=discord.Color.gold()
+        )
+        seller_view = MiddlemanSellerRulesView(interaction.channel.id)
+        seller_msg = await interaction.channel.send(embed=seller_rules_embed, view=seller_view)
+        data["rules_msg_ids"].append(seller_msg.id)
+
+
+class MiddlemanSellerRulesView(discord.ui.View):
+    """中間商規則同意 — 賣家規則（買家同意後才顯示）"""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success, custom_id="mm_seller_rules_agree")
+    async def seller_agree(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        if not data:
+            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        if interaction.user.id != data["seller_id"]:
+            await interaction.response.send_message("❌ 只有賣家可以操作此按鈕。", ephemeral=True)
+            return
+
+        if data["seller_agreed_rules"]:
+            await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
+            return
+
+        data["seller_agreed_rules"] = True
+
+        # 禁用賣家按鈕
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # 雙方都同意 → 刪除所有規則相關訊息 + 金額明細訊息，然後進入金額輸入
+        channel = interaction.channel
+        # 刪除規則訊息
+        for msg_id in data.get("rules_msg_ids", []):
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.delete()
+            except Exception:
+                pass
+        # 刪除金額明細訊息
+        for msg_id in data.get("amount_msg_ids", []):
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.delete()
+            except Exception:
+                pass
+        data["rules_msg_ids"] = []
+        data["amount_msg_ids"] = []
+
+        data["phase"] = "payment"
+        await self._proceed_to_payment(channel, data)
+
+    async def _proceed_to_payment(self, channel, data):
+        """進入付款階段"""
+        payment_embed = discord.Embed(
+            title="💳 請買家匯款",
+            description=(
+                f"**交易金額:** {data['amount']:.0f} TWD\n"
+                f"**手續費:** {data['fee']:.0f} TWD\n"
+                f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
+                f"**買家需支付總額:** {data['total']:.0f} TWD\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"**📌 請買家將款項匯給中間商。**\n\n"
+                f"匯款完成後，請等待中間商確認收款。\n"
+                f"中間商/老闆確認收款後將使用 `/received` 命令確認。"
+            ),
+            color=discord.Color.gold()
+        )
+        await channel.send(embed=payment_embed)
 
 
 class MiddlemanAmountConfirmView(discord.ui.View):
@@ -1954,7 +1999,7 @@ class MiddlemanAmountConfirmView(discord.ui.View):
             await interaction.response.send_message("❌ 只有買家和賣家可以確認金額。", ephemeral=True)
             return
 
-        # 雙方都確認 → 進入付款階段
+        # 雙方都確認 → 進入規則同意階段
         if data["buyer_confirmed_amount"] and data["seller_confirmed_amount"]:
             for child in self.children:
                 child.disabled = True
@@ -1962,10 +2007,31 @@ class MiddlemanAmountConfirmView(discord.ui.View):
                 await interaction.message.edit(view=self)
             except Exception:
                 pass
-            data["phase"] = "payment"
-            await self._proceed_to_payment(interaction.channel, data)
+            # 追蹤金額確認訊息 ID（用於規則同意後刪除）
+            data["amount_msg_ids"].append(interaction.message.id)
+            data["phase"] = "rules_agree"
+            await self._proceed_to_rules(interaction.channel, data)
 
-    @discord.ui.button(label="🔄 重新輸入金額", style=discord.ButtonStyle.secondary, custom_id="mm_amount_reset")
+    async def _proceed_to_rules(self, channel, data):
+        """進入規則同意階段 — 先顯示買家規則"""
+        rules_url = "https://ptb.discord.com/channels/1464245186954526793/1475397009837133876"
+        guild = channel.guild
+        buyer = guild.get_member(data["buyer_id"])
+
+        buyer_rules_embed = discord.Embed(
+            title="📜 買家服務規則",
+            description=(
+                f"請 **買家** {buyer.mention if buyer else ''} 閱讀並同意中間商服務規則。\n\n"
+                f"📖 **規則連結:** [點擊查看規則]({rules_url})\n\n"
+                f"請按下方「✅ 我同意規則」按鈕。"
+            ),
+            color=discord.Color.gold()
+        )
+        buyer_view = MiddlemanBuyerRulesView(channel.id)
+        buyer_msg = await channel.send(embed=buyer_rules_embed, view=buyer_view)
+        data["rules_msg_ids"].append(buyer_msg.id)
+
+    @discord.ui.button(label="重新輸入金額", style=discord.ButtonStyle.secondary, custom_id="mm_amount_reset")
     async def reset_amount(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = middleman_data.get(self.channel_id or interaction.channel.id)
         if not data:
@@ -1999,37 +2065,22 @@ class MiddlemanAmountConfirmView(discord.ui.View):
         )
         await interaction.channel.send(embed=reset_embed)
 
-    async def _proceed_to_payment(self, channel, data):
-        """進入付款階段"""
-        payment_embed = discord.Embed(
-            title="💳 請買家匯款",
-            description=(
-                f"**交易金額:** {data['amount']:.0f} TWD\n"
-                f"**手續費:** {data['fee']:.0f} TWD\n"
-                f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
-                f"**買家需支付總額:** {data['total']:.0f} TWD\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"**📌 請買家將款項匯給中間商。**\n\n"
-                f"匯款完成後，請等待中間商確認收款。\n"
-                f"中間商/老闆確認收款後將使用 `/received` 命令確認。"
-            ),
-            color=discord.Color.gold()
-        )
-        await channel.send(embed=payment_embed)
-
 
 class MiddlemanOpenView(discord.ui.View):
-    """中間商服務開單按鈕"""
+    """中間商服務開單下拉選單"""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="\u200b",
-        style=discord.ButtonStyle.primary,
-        emoji="🤝",
-        custom_id="middleman_open_btn"
+    @discord.ui.select(
+        placeholder="\ud83e\udd1d 選擇付款方式以開單",
+        custom_id="middleman_open_select",
+        options=[
+            discord.SelectOption(label="銀行轉帳", value="bank_transfer", emoji="\ud83c\udfe6", description="使用銀行轉帳付款"),
+            discord.SelectOption(label="7-11無卡匯款", value="711_cardless", emoji="\ud83c\udfea", description="使用7-11無卡匯款"),
+            discord.SelectOption(label="全家無卡匯款", value="family_cardless", emoji="\ud83c\udfec", description="使用全家無卡匯款"),
+        ]
     )
-    async def open_middleman(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def open_middleman(self, interaction: discord.Interaction, select: discord.ui.Select):
         guild = interaction.guild
         category = guild.get_channel(MIDDLEMAN_CATEGORY_ID)
 
@@ -2083,13 +2134,18 @@ class MiddlemanOpenView(discord.ui.View):
             topic=f"owner:{interaction.user.id} | 中間商工單"
         )
 
+        # 記錄買家選擇的付款方式
+        payment_labels = {"bank_transfer": "銀行轉帳", "711_cardless": "7-11無卡匯款", "family_cardless": "全家無卡匯款"}
+        selected_payment = select.values[0] if select.values else "unknown"
+        buyer_payment_label = payment_labels.get(selected_payment, selected_payment)
+
         # 初始化中間商工單資料（新流程：先等待 @ 對方）
         middleman_data[ticket_channel.id] = {
             "opener_id": interaction.user.id,
             "invited_id": None,  # 被 @ 的人
             "buyer_id": None,
             "seller_id": None,
-            "buyer_payment": None,
+            "buyer_payment": buyer_payment_label,
             "seller_payment": None,
             "amount": None,
             "fee": None,
@@ -2102,7 +2158,10 @@ class MiddlemanOpenView(discord.ui.View):
             "seller_confirmed_amount": False,
             "payment_received": False,
             "completed": False,
-            "phase": "invite",  # invite -> role_select -> role_confirm -> rules_agree -> amount_input -> amount_confirm -> payment -> completed
+            "phase": "invite",
+            "amount_msg_ids": [],  # 金額明細相關訊息 ID（用於刪除）
+            "rules_msg_ids": [],   # 規則相關訊息 ID（用於刪除）
+            "received_done": False,  # /received 是否已執行
         }
 
         # 發送工單資訊（等待 @ 對方）
@@ -2113,6 +2172,7 @@ class MiddlemanOpenView(discord.ui.View):
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"**📋 開單資訊：**\n"
                 f"• 開單者: {interaction.user.mention}\n"
+                f"• 付款方式: {buyer_payment_label}\n"
                 f"• 開單時間: <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"**👉 請 @ 你的交易對象（買家或賣家），系統將自動將對方加入此工單。**\n"
@@ -2165,6 +2225,7 @@ async def on_ready():
     bot.add_view(InquiryTicketView())
     bot.add_view(InquiryAdminView())
     bot.add_view(MiddlemanOpenView())
+    bot.add_view(MiddlemanSellerPaymentView(0))
 
     # 為已存在的中間商工單重新註冊 view
     # （重啟後 middleman_data 會清空，但按鈕的 custom_id 是固定的，
@@ -2301,7 +2362,7 @@ async def on_message(message: discord.Message):
                         f"**買家需支付總額:** {total:.0f} TWD\n\n"
                         f"請 **買家** {buyer.mention if buyer else ''} 先按「✅ 金額確定」，\n"
                         f"然後 **賣家** {seller.mention if seller else ''} 再按「✅ 金額確定」（代表同意）。\n\n"
-                        f"如需修改金額，買家可按「🔄 重新輸入金額」。"
+                        f"如需修改金額，買家可按「重新輸入金額」。"
                     ),
                     color=discord.Color.green()
                 )
@@ -2356,7 +2417,13 @@ async def on_interaction(interaction: discord.Interaction):
         return
 
     if custom_id in ("mm_role_confirm_ok", "mm_role_confirm_no", "mm_rules_agree",
-                      "mm_amount_confirm", "mm_amount_reset"):
+                      "mm_amount_confirm", "mm_amount_reset",
+                      "mm_buyer_rules_agree", "mm_seller_rules_agree",
+                      "mm_seller_payment_select",
+                      "mm_close_ticket_confirm1", "mm_close_ticket_cancel1",
+                      "mm_close_ticket_final", "mm_close_ticket_final_cancel",
+                      "mm_received_confirm", "mm_received_cancel",
+                      "mm_final_confirm", "mm_final_cancel"):
         ch_id = interaction.channel.id
         data = middleman_data.get(ch_id)
         if not data:
@@ -2778,6 +2845,150 @@ async def set_price_cmd(interaction: discord.Interaction, price: str):
 
 
 # ============================================================
+# 中間商工單關閉命令
+# ============================================================
+
+@bot.tree.command(name="close-ticket", description="關閉中間商工單（僅在確認收款前可使用）")
+async def close_mm_ticket(interaction: discord.Interaction):
+    """關閉中間商工單 — 只有管理員/中間mm/開單者可用，在確認收款前可使用"""
+    ch_id = interaction.channel.id
+
+    if ch_id not in middleman_data:
+        await interaction.response.send_message("❌ 此命令只能在中間商工單頻道內使用。", ephemeral=True)
+        return
+
+    data = middleman_data[ch_id]
+
+    # 權限檢查：管理員/中間mm/開單者
+    is_opener = interaction.user.id == data.get("opener_id")
+    if not is_admin(interaction.user) and not is_middleman(interaction.user) and not is_opener:
+        await interaction.response.send_message("❌ 僅管理員、中間mm或開單者可使用此命令。", ephemeral=True)
+        return
+
+    # 檢查是否已過確認收款階段
+    if data.get("payment_received") or data.get("phase") in ["completed", "seller_payment_select", "waiting_done_money"]:
+        await interaction.response.send_message("❌ 已過確認收款階段，無法關閉工單。", ephemeral=True)
+        return
+
+    # 第一次確認
+    confirm_embed = discord.Embed(
+        title="確認關閉工單",
+        description=(
+            f"你確定要關閉此中間商工單嗎？\n\n"
+            f"關閉後此交易將不會計入消費記錄。\n"
+            f"此操作無法撤銷。"
+        ),
+        color=discord.Color.orange()
+    )
+    view = MiddlemanCloseTicketConfirmView(ch_id)
+    await interaction.response.send_message(embed=confirm_embed, view=view)
+
+
+class MiddlemanCloseTicketConfirmView(discord.ui.View):
+    """中間商工單關閉確認（兩次確認）"""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=60)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="確認關閉", style=discord.ButtonStyle.danger, custom_id="mm_close_ticket_confirm1")
+    async def confirm_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        if not data:
+            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        # 第二次確認
+        confirm2_embed = discord.Embed(
+            title="最終確認",
+            description=(
+                f"這是最後確認。\n\n"
+                f"確認關閉後，頻道將在 5 秒後刪除。\n"
+                f"此交易將不會計入任何消費記錄。"
+            ),
+            color=discord.Color.red()
+        )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        view2 = MiddlemanCloseTicketFinalView(self.channel_id or interaction.channel.id)
+        await interaction.channel.send(embed=confirm2_embed, view=view2)
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, custom_id="mm_close_ticket_cancel1")
+    async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("已取消關閉工單。", ephemeral=True)
+
+
+class MiddlemanCloseTicketFinalView(discord.ui.View):
+    """中間商工單關閉最終確認"""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=60)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="確認關閉並刪除頻道", style=discord.ButtonStyle.danger, custom_id="mm_close_ticket_final")
+    async def final_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        ch_id = self.channel_id or interaction.channel.id
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # 發送聊天紀錄到結單頻道
+        guild = interaction.guild
+        log_channel = guild.get_channel(MIDDLEMAN_LOG_CHANNEL_ID)
+        if log_channel and data:
+            buyer = guild.get_member(data["buyer_id"]) if data.get("buyer_id") else None
+            seller = guild.get_member(data["seller_id"]) if data.get("seller_id") else None
+
+            close_embed = discord.Embed(
+                title="❌ 中間商工單已關閉（未完成）",
+                description=(
+                    f"**買家:** {buyer.mention if buyer else '未指定'}\n"
+                    f"**賣家:** {seller.mention if seller else '未指定'}\n"
+                    f"**關閉者:** {interaction.user.mention}\n"
+                    f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
+                    f"此工單已被手動關閉，交易未完成。"
+                ),
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            await log_channel.send(embed=close_embed)
+
+            # 生成聊天紀錄
+            opener = buyer if buyer else interaction.user
+            await save_transcript(
+                channel=interaction.channel,
+                log_channel=log_channel,
+                ticket_owner=opener,
+                ticket_type="中間商服務（已關閉）",
+                ticket_info="工單已手動關閉",
+                closer=interaction.user
+            )
+
+        # 清理資料
+        if ch_id in middleman_data:
+            del middleman_data[ch_id]
+
+        await interaction.channel.send("工單已關閉，頻道將在 5 秒後刪除...")
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason="中間商工單已關閉")
+        except Exception:
+            pass
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, custom_id="mm_close_ticket_final_cancel")
+    async def cancel_final(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("已取消關閉工單。", ephemeral=True)
+
+
+# ============================================================
 # 中間商收款確認命令（頻道限定）
 # ============================================================
 
@@ -2895,70 +3106,29 @@ class MiddlemanFinalConfirmView(discord.ui.View):
             return
 
         data["payment_received"] = True
-        data["completed"] = True
-        data["phase"] = "completed"
+        data["received_done"] = True
+        data["phase"] = "seller_payment_select"
 
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
         guild = interaction.guild
-        buyer = guild.get_member(data["buyer_id"]) if data["buyer_id"] else None
         seller = guild.get_member(data["seller_id"]) if data["seller_id"] else None
 
-        complete_embed = discord.Embed(
-            title="✅ 交易完成！",
+        # 要求賣家選擇收款方式
+        seller_payment_embed = discord.Embed(
+            title="💰 請賣家選擇收款方式",
             description=(
-                f"**🛒 買家:** {buyer.mention if buyer else '未知'}\n"
-                f"**💰 賣家:** {seller.mention if seller else '未知'}\n"
-                f"**交易金額:** {data['amount']:.0f} TWD\n"
-                f"**手續費:** {data['fee']:.0f} TWD\n"
-                f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
-                f"**買家支付總額:** {data['total']:.0f} TWD\n\n"
-                f"**確認者:** {interaction.user.mention}\n"
-                f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"交易已完成！管理員可手動結單。"
+                f"已確認收款並準備放款。\n\n"
+                f"請 **賣家** {seller.mention if seller else ''} 從下方選單選擇收款方式。\n\n"
+                f"選擇完成後，老闆/中間MM 將進行放款，\n"
+                f"並使用 `/done-money` 命令完成交易。"
             ),
-            color=discord.Color.green()
+            color=discord.Color.blue()
         )
-        await interaction.channel.send(embed=complete_embed)
-
-        # VIP 升級檢查（買家消費）
-        if buyer and data["amount"]:
-            upgraded = await add_spending(guild, buyer.id, data["amount"])
-            if upgraded:
-                vip_embed = discord.Embed(
-                    title="⭐ VIP 買家升級！",
-                    description=(
-                        f"恭喜 {buyer.mention} 累計消費已達門檻，\n"
-                        f"已自動升級為 **VIP Buyer** 身分組！"
-                    ),
-                    color=discord.Color.gold()
-                )
-                await interaction.channel.send(embed=vip_embed)
-
-        # 發送到中間商結單頻道
-        log_channel = guild.get_channel(MIDDLEMAN_LOG_CHANNEL_ID)
-        if log_channel:
-            log_embed = discord.Embed(
-                title="🤝 中間商交易完成",
-                description=(
-                    f"**🛒 買家:** {buyer.mention if buyer else '未知'}\n"
-                    f"**💰 賣家:** {seller.mention if seller else '未知'}\n"
-                    f"**交易金額:** {data['amount']:.0f} TWD\n"
-                    f"**手續費:** {data['fee']:.0f} TWD\n"
-                    f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
-                    f"**買家支付總額:** {data['total']:.0f} TWD\n"
-                    f"**💳 買家付款方式:** {data.get('buyer_payment', '未知')}\n"
-                    f"**💰 賣家收款方式:** {data.get('seller_payment', '未知')}\n"
-                    f"**確認者:** {interaction.user.mention}\n"
-                    f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>"
-                ),
-                color=discord.Color.green(),
-                timestamp=datetime.datetime.now(datetime.timezone.utc)
-            )
-            await log_channel.send(embed=log_embed)
+        seller_view = MiddlemanSellerPaymentView(interaction.channel.id)
+        await interaction.channel.send(embed=seller_payment_embed, view=seller_view)
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary, custom_id="mm_final_cancel")
     async def cancel_final(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2966,6 +3136,145 @@ class MiddlemanFinalConfirmView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
         await interaction.followup.send("✅ 已取消放款確認。", ephemeral=True)
+
+
+class MiddlemanSellerPaymentView(discord.ui.View):
+    """賣家收款方式下拉選單"""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.select(
+        placeholder="請選擇收款方式...",
+        options=[
+            discord.SelectOption(label="銀行轉帳", value="銀行轉帳", emoji="🏦"),
+            discord.SelectOption(label="7-11無卡匯款", value="7-11無卡匯款", emoji="🏪"),
+            discord.SelectOption(label="全家無卡匯款", value="全家無卡匯款", emoji="🏪"),
+        ],
+        custom_id="mm_seller_payment_select"
+    )
+    async def select_seller_payment(self, interaction: discord.Interaction, select: discord.ui.Select):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        if not data:
+            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        if interaction.user.id != data.get("seller_id"):
+            await interaction.response.send_message("❌ 只有賣家可以選擇收款方式。", ephemeral=True)
+            return
+
+        selected = select.values[0]
+        data["seller_payment"] = selected
+        data["phase"] = "waiting_done_money"
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        await interaction.channel.send(
+            f"✅ 賣家已選擇收款方式：**{selected}**\n\n"
+            f"請老闆/中間MM 放款完成後，使用 `/done-money` 命令完成交易。"
+        )
+
+
+@bot.tree.command(name="done-money", description="確認已放款給賣家，完成交易 | Confirm payment sent to seller")
+async def done_money(interaction: discord.Interaction):
+    """老闆/中間MM 確認已放款給賣家"""
+    if not is_boss(interaction.user) and not is_middleman(interaction.user):
+        await interaction.response.send_message("❌ 僅老闆或中間mm身分組可使用此命令。", ephemeral=True)
+        return
+
+    ch_id = interaction.channel.id
+    if ch_id not in middleman_data:
+        await interaction.response.send_message("❌ 此命令只能在中間商工單頻道內使用。", ephemeral=True)
+        return
+
+    data = middleman_data[ch_id]
+
+    if data["phase"] != "waiting_done_money":
+        await interaction.response.send_message("❌ 目前不在等待放款確認階段。", ephemeral=True)
+        return
+
+    if not data.get("seller_payment"):
+        await interaction.response.send_message("❌ 賣家尚未選擇收款方式，請等待賣家選擇。", ephemeral=True)
+        return
+
+    data["completed"] = True
+    data["phase"] = "completed"
+
+    guild = interaction.guild
+    buyer = guild.get_member(data["buyer_id"]) if data["buyer_id"] else None
+    seller = guild.get_member(data["seller_id"]) if data["seller_id"] else None
+
+    complete_embed = discord.Embed(
+        title="✅ 交易完成！",
+        description=(
+            f"**🛒 買家:** {buyer.mention if buyer else '未知'}\n"
+            f"**💰 賣家:** {seller.mention if seller else '未知'}\n"
+            f"**交易金額:** {data['amount']:.0f} TWD\n"
+            f"**手續費:** {data['fee']:.0f} TWD\n"
+            f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
+            f"**買家支付總額:** {data['total']:.0f} TWD\n"
+            f"**💳 買家付款方式:** {data.get('buyer_payment', '未知')}\n"
+            f"**💰 賣家收款方式:** {data.get('seller_payment', '未知')}\n\n"
+            f"**確認者:** {interaction.user.mention}\n"
+            f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"交易已完成！"
+        ),
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=complete_embed)
+
+    # VIP 升級檢查（買家消費）
+    if buyer and data["amount"]:
+        upgraded = await add_spending(guild, buyer.id, data["amount"])
+        if upgraded:
+            vip_embed = discord.Embed(
+                title="⭐ VIP 買家升級！",
+                description=(
+                    f"恭喜 {buyer.mention} 累計消費已達門檻，\n"
+                    f"已自動升級為 **VIP Buyer** 身分組！"
+                ),
+                color=discord.Color.gold()
+            )
+            await interaction.channel.send(embed=vip_embed)
+
+    # 發送到中間商結單頻道（含聊天紀錄）
+    log_channel = guild.get_channel(MIDDLEMAN_LOG_CHANNEL_ID)
+    if log_channel:
+        log_embed = discord.Embed(
+            title="🤝 中間商交易完成",
+            description=(
+                f"**🛒 買家:** {buyer.mention if buyer else '未知'}\n"
+                f"**💰 賣家:** {seller.mention if seller else '未知'}\n"
+                f"**交易金額:** {data['amount']:.0f} TWD\n"
+                f"**手續費:** {data['fee']:.0f} TWD\n"
+                f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
+                f"**買家支付總額:** {data['total']:.0f} TWD\n"
+                f"**💳 買家付款方式:** {data.get('buyer_payment', '未知')}\n"
+                f"**💰 賣家收款方式:** {data.get('seller_payment', '未知')}\n"
+                f"**確認者:** {interaction.user.mention}\n"
+                f"**時間:** <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>"
+            ),
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+
+        await log_channel.send(embed=log_embed)
+
+        # 生成聊天紀錄
+        opener = buyer if buyer else (seller if seller else interaction.user)
+        await save_transcript(
+            channel=interaction.channel,
+            log_channel=log_channel,
+            ticket_owner=opener,
+            ticket_type="中間商服務",
+            ticket_info=f"交易金額: {data['amount']:.0f} TWD",
+            price=f"{data['amount']:.0f} TWD",
+            claimed_by_name=interaction.user.display_name,
+            closer=interaction.user
+        )
 
 
 # ============================================================
@@ -3280,6 +3589,7 @@ async def refresh_bot(interaction: discord.Interaction):
         bot.add_view(InquiryTicketView())
         bot.add_view(InquiryAdminView())
         bot.add_view(MiddlemanOpenView())
+        bot.add_view(MiddlemanSellerPaymentView(0))
 
         # 同步命令
         synced = await bot.tree.sync(guild=interaction.guild)
