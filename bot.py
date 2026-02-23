@@ -1870,6 +1870,9 @@ class MiddlemanBuyerRulesView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
+        # 追蹤買家規則訊息 ID（用於後續刪除）
+        data["rules_msg_ids"].append(interaction.message.id)
+
         # 現在顯示賣家規則
         guild = interaction.guild
         seller = guild.get_member(data["seller_id"])
@@ -1918,22 +1921,27 @@ class MiddlemanSellerRulesView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        # 雙方都同意 → 刪除所有規則相關訊息 + 金額明細訊息，然後進入金額輸入
+        # 雙方都同意 → 先刪除金額明細訊息，再刪除規則訊息
         channel = interaction.channel
-        # 刪除規則訊息
-        for msg_id in data.get("rules_msg_ids", []):
-            try:
-                msg = await channel.fetch_message(msg_id)
-                await msg.delete()
-            except Exception:
-                pass
-        # 刪除金額明細訊息
+        # 刪除金額明細相關訊息（包含確認回覆）
         for msg_id in data.get("amount_msg_ids", []):
             try:
                 msg = await channel.fetch_message(msg_id)
                 await msg.delete()
             except Exception:
                 pass
+        # 刪除規則相關訊息（包含買家規則和賣家規則）
+        for msg_id in data.get("rules_msg_ids", []):
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.delete()
+            except Exception:
+                pass
+        # 刪除當前賣家規則訊息本身（interaction.message）
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
         data["rules_msg_ids"] = []
         data["amount_msg_ids"] = []
 
@@ -1983,6 +1991,12 @@ class MiddlemanAmountConfirmView(discord.ui.View):
                 f"✅ 買家 {interaction.user.mention} 已確認金額。等待賣家確認...",
                 ephemeral=False
             )
+            # 追蹤確認回覆訊息 ID
+            try:
+                confirm_msg = await interaction.original_response()
+                data["amount_msg_ids"].append(confirm_msg.id)
+            except Exception:
+                pass
         elif user_id == data["seller_id"]:
             if not data["buyer_confirmed_amount"]:
                 await interaction.response.send_message("❌ 請等待買家先確認金額。", ephemeral=True)
@@ -1995,6 +2009,12 @@ class MiddlemanAmountConfirmView(discord.ui.View):
                 f"✅ 賣家 {interaction.user.mention} 已確認金額。",
                 ephemeral=False
             )
+            # 追蹤確認回覆訊息 ID
+            try:
+                confirm_msg = await interaction.original_response()
+                data["amount_msg_ids"].append(confirm_msg.id)
+            except Exception:
+                pass
         else:
             await interaction.response.send_message("❌ 只有買家和賣家可以確認金額。", ephemeral=True)
             return
@@ -2367,7 +2387,8 @@ async def on_message(message: discord.Message):
                     color=discord.Color.green()
                 )
                 view = MiddlemanAmountConfirmView(ch_id)
-                await message.channel.send(embed=amount_embed, view=view)
+                amount_msg = await message.channel.send(embed=amount_embed, view=view)
+                data["amount_msg_ids"].append(amount_msg.id)
 
             except ValueError:
                 # 不是數字，忽略（可能是正常聊天）
@@ -3171,8 +3192,10 @@ class MiddlemanSellerPaymentView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
+        seller = interaction.guild.get_member(data.get("seller_id"))
+        seller_mention = seller.mention if seller else '賣家'
         await interaction.channel.send(
-            f"✅ 賣家已選擇收款方式：**{selected}**\n\n"
+            f"✅ {seller_mention} 賣家已選擇收款方式：**{selected}**\n\n"
             f"請老闆/中間MM 放款完成後，使用 `/done-money` 命令完成交易。"
         )
 
@@ -3275,6 +3298,40 @@ async def done_money(interaction: discord.Interaction):
             claimed_by_name=interaction.user.display_name,
             closer=interaction.user
         )
+
+    # 禁言：除了老闆/中間MM 外，其他人不能發言
+    channel = interaction.channel
+    try:
+        # 設定 @everyone 不能發言
+        everyone_role = guild.default_role
+        await channel.set_permissions(everyone_role, send_messages=False)
+        # 確保老闆和中間MM 身分組仍可發言
+        boss_role = guild.get_role(BOSS_ROLE_ID)
+        mm_role = guild.get_role(MIDDLEMAN_ROLE_ID)
+        admin_role = guild.get_role(ADMIN_ROLE_ID)
+        if boss_role:
+            await channel.set_permissions(boss_role, send_messages=True)
+        if mm_role:
+            await channel.set_permissions(mm_role, send_messages=True)
+        if admin_role:
+            await channel.set_permissions(admin_role, send_messages=True)
+    except Exception:
+        pass
+
+    # 10 分鐘後自動刪除頻道
+    async def auto_delete_channel():
+        await asyncio.sleep(600)  # 10 分鐘
+        try:
+            await channel.delete(reason="中間商交易完成，自動刪除頻道")
+        except Exception:
+            pass
+        # 清理 middleman_data
+        if ch_id in middleman_data:
+            del middleman_data[ch_id]
+
+    asyncio.create_task(auto_delete_channel())
+
+    await channel.send("⏰ 此頻道將在 **10 分鐘** 後自動刪除。")
 
 
 # ============================================================
