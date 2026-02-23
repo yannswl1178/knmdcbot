@@ -1557,150 +1557,16 @@ class InquiryTicketView(discord.ui.View):
 # 系統四：中間商服務系統
 # ============================================================
 
-class MiddlemanOpenModal(discord.ui.Modal, title="🤝 中間商開單資訊"):
-    buyer_payment = discord.ui.TextInput(
-        label="買家付款方式",
-        placeholder="例如: 銀行轉帳 / Line Pay / 加密貨幣",
-        style=discord.TextStyle.short,
-        required=True,
-        max_length=100
-    )
-    seller_payment = discord.ui.TextInput(
-        label="賣家收款方式",
-        placeholder="例如: 銀行轉帳 / 街口支付",
-        style=discord.TextStyle.short,
-        required=True,
-        max_length=100
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        category = guild.get_channel(MIDDLEMAN_CATEGORY_ID)
-
-        if not category:
-            await interaction.response.send_message("❌ 找不到中間商服務類別，請聯繫管理員。", ephemeral=True)
-            return
-
-        # 檢查是否已有開啟的中間商工單
-        existing = discord.utils.get(
-            guild.text_channels,
-            name=f"mm-{interaction.user.name.lower().replace(' ', '-')}"
-        )
-        if existing:
-            await interaction.response.send_message(
-                f"❌ 你已經有一個開啟的中間商工單: {existing.mention}\n請先完成後再開新單。",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        admin_role = guild.get_role(ADMIN_ROLE_ID)
-        middleman_role = guild.get_role(MIDDLEMAN_ROLE_ID)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                attach_files=True, embed_links=True
-            ),
-            guild.me: discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                manage_channels=True, manage_messages=True
-            )
-        }
-        if admin_role:
-            overwrites[admin_role] = discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                attach_files=True, embed_links=True
-            )
-        if middleman_role:
-            overwrites[middleman_role] = discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                attach_files=True, embed_links=True
-            )
-
-        ticket_channel = await guild.create_text_channel(
-            name=f"mm-{interaction.user.name.lower().replace(' ', '-')}",
-            category=category,
-            overwrites=overwrites,
-            topic=f"owner:{interaction.user.id} | 中間商工單"
-        )
-
-        # 初始化中間商工單資料
-        middleman_data[ticket_channel.id] = {
-            "opener_id": interaction.user.id,
-            "buyer_id": None,
-            "seller_id": None,
-            "buyer_payment": self.buyer_payment.value,
-            "seller_payment": self.seller_payment.value,
-            "amount": None,
-            "fee": None,
-            "total": None,
-            "buyer_confirmed_role": False,
-            "seller_confirmed_role": False,
-            "buyer_agreed_rules": False,
-            "seller_agreed_rules": False,
-            "buyer_confirmed_amount": False,
-            "seller_confirmed_amount": False,
-            "payment_received": False,
-            "completed": False,
-            "phase": "role_select",  # role_select -> role_confirm -> rules_agree -> amount_input -> amount_confirm -> payment -> completed
-        }
-
-        # 發送工單資訊
-        info_embed = discord.Embed(
-            title="🤝 中間商服務工單",
-            description=(
-                f"歡迎使用中間商服務！\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"**📋 開單資訊：**\n"
-                f"• 開單者: {interaction.user.mention}\n"
-                f"• 💳 買家付款方式: **{self.buyer_payment.value}**\n"
-                f"• 💰 賣家收款方式: **{self.seller_payment.value}**\n"
-                f"• 開單時間: <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"請雙方先選擇各自的角色（買家/賣家）。"
-            ),
-            color=discord.Color.orange(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        info_embed.set_footer(text=f"中間商工單 ID: {ticket_channel.id}")
-        await ticket_channel.send(embed=info_embed)
-
-        # 發送角色選擇按鈕
-        role_embed = discord.Embed(
-            title="👥 請選擇你的角色",
-            description=(
-                "請買家和賣家分別點擊下方對應的按鈕。\n"
-                "每個角色只能由一人選擇，選擇後無法更改。"
-            ),
-            color=discord.Color.blue()
-        )
-        role_view = MiddlemanRoleSelectView(ticket_channel.id)
-        await ticket_channel.send(embed=role_embed, view=role_view)
-
-        # 發送結單按鈕
-        close_view = CloseTicketView()
-        await ticket_channel.send(
-            embed=discord.Embed(
-                description="管理員可使用下方按鈕結單。",
-                color=discord.Color.greyple()
-            ),
-            view=close_view
-        )
-
-        await interaction.followup.send(
-            f"✅ 中間商工單已建立！請前往 {ticket_channel.mention} 查看。",
-            ephemeral=True
-        )
+# MiddlemanOpenModal 已移除，開單流程改為直接建立頻道，然後等待 @ 對方
 
 
 class MiddlemanRoleSelectView(discord.ui.View):
-    """中間商角色選擇按鈕"""
+    """中間商角色選擇按鈕（含返回按鈕）"""
     def __init__(self, channel_id: int):
         super().__init__(timeout=None)
         self.channel_id = channel_id
+        # 返回按鈕初始為禁用狀態
+        self.reset_btn.disabled = True
 
     @discord.ui.button(label="🛒 我是買家", style=discord.ButtonStyle.primary, custom_id="mm_role_buyer")
     async def select_buyer(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1709,7 +1575,11 @@ class MiddlemanRoleSelectView(discord.ui.View):
             await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
             return
 
-        ch_id = self.channel_id or interaction.channel.id
+        # 只有開單者和被@的人可以選擇角色
+        allowed_ids = [data["opener_id"], data.get("invited_id")]
+        if interaction.user.id not in allowed_ids:
+            await interaction.response.send_message("❌ 只有開單者和被邀請的交易對象可以選擇角色。", ephemeral=True)
+            return
 
         if data["buyer_id"] is not None:
             await interaction.response.send_message("❌ 買家角色已被選擇。", ephemeral=True)
@@ -1724,6 +1594,9 @@ class MiddlemanRoleSelectView(discord.ui.View):
         button.label = f"🛒 買家: {interaction.user.display_name}"
         button.style = discord.ButtonStyle.secondary
 
+        # 啟用返回按鈕（任一方選擇後啟用）
+        self.reset_btn.disabled = False
+
         # 檢查是否雙方都已選擇
         if data["seller_id"] is not None:
             for child in self.children:
@@ -1733,7 +1606,7 @@ class MiddlemanRoleSelectView(discord.ui.View):
         else:
             await interaction.response.edit_message(view=self)
             await interaction.followup.send(
-                f"✅ {interaction.user.mention} 已選擇 **買家** 角色。等待賣家選擇...",
+                f"✅ {interaction.user.mention} 已選擇 **買家** 角色。等待對方選擇...",
                 ephemeral=False
             )
 
@@ -1744,7 +1617,11 @@ class MiddlemanRoleSelectView(discord.ui.View):
             await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
             return
 
-        ch_id = self.channel_id or interaction.channel.id
+        # 只有開單者和被@的人可以選擇角色
+        allowed_ids = [data["opener_id"], data.get("invited_id")]
+        if interaction.user.id not in allowed_ids:
+            await interaction.response.send_message("❌ 只有開單者和被邀請的交易對象可以選擇角色。", ephemeral=True)
+            return
 
         if data["seller_id"] is not None:
             await interaction.response.send_message("❌ 賣家角色已被選擇。", ephemeral=True)
@@ -1759,6 +1636,9 @@ class MiddlemanRoleSelectView(discord.ui.View):
         button.label = f"💰 賣家: {interaction.user.display_name}"
         button.style = discord.ButtonStyle.secondary
 
+        # 啟用返回按鈕（任一方選擇後啟用）
+        self.reset_btn.disabled = False
+
         # 檢查是否雙方都已選擇
         if data["buyer_id"] is not None:
             for child in self.children:
@@ -1768,9 +1648,54 @@ class MiddlemanRoleSelectView(discord.ui.View):
         else:
             await interaction.response.edit_message(view=self)
             await interaction.followup.send(
-                f"✅ {interaction.user.mention} 已選擇 **賣家** 角色。等待買家選擇...",
+                f"✅ {interaction.user.mention} 已選擇 **賣家** 角色。等待對方選擇...",
                 ephemeral=False
             )
+
+    @discord.ui.button(label="🔄 返回", style=discord.ButtonStyle.danger, custom_id="mm_role_reset")
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = middleman_data.get(self.channel_id or interaction.channel.id)
+        if not data:
+            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        # 只有開單者和被@的人可以重置
+        allowed_ids = [data["opener_id"], data.get("invited_id")]
+        if interaction.user.id not in allowed_ids:
+            await interaction.response.send_message("❌ 只有開單者和被邀請的交易對象可以操作。", ephemeral=True)
+            return
+
+        # 重置角色選擇
+        data["buyer_id"] = None
+        data["seller_id"] = None
+        data["buyer_confirmed_role"] = False
+        data["seller_confirmed_role"] = False
+        data["phase"] = "role_select"
+
+        # 禁用當前 view 的所有按鈕
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        reset_embed = discord.Embed(
+            title="🔄 角色已重置",
+            description="角色選擇已重置，請重新選擇角色。",
+            color=discord.Color.red()
+        )
+        await interaction.channel.send(embed=reset_embed)
+
+        # 重新發送角色選擇
+        role_embed = discord.Embed(
+            title="👥 請選擇你的角色",
+            description=(
+                "請買家和賣家分別點擊下方對應的按鈕。\n"
+                "每個角色只能由一人選擇。\n"
+                "如需重新選擇，請按「🔄 返回」。"
+            ),
+            color=discord.Color.blue()
+        )
+        role_view = MiddlemanRoleSelectView(interaction.channel.id)
+        await interaction.channel.send(embed=role_embed, view=role_view)
 
     async def _proceed_to_role_confirm(self, channel, data):
         """雙方都選擇角色後，進入角色確認階段"""
@@ -1883,7 +1808,8 @@ class MiddlemanRoleConfirmView(discord.ui.View):
             title="👥 請選擇你的角色",
             description=(
                 "請買家和賣家分別點擊下方對應的按鈕。\n"
-                "每個角色只能由一人選擇，選擇後無法更改。"
+                "每個角色只能由一人選擇。\n"
+                "如需重新選擇，請按「🔄 返回」。"
             ),
             color=discord.Color.blue()
         )
@@ -2098,14 +2024,120 @@ class MiddlemanOpenView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="🤝 開單",
+        label="\u200b",
         style=discord.ButtonStyle.primary,
         emoji="🤝",
         custom_id="middleman_open_btn"
     )
     async def open_middleman(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = MiddlemanOpenModal()
-        await interaction.response.send_modal(modal)
+        guild = interaction.guild
+        category = guild.get_channel(MIDDLEMAN_CATEGORY_ID)
+
+        if not category:
+            await interaction.response.send_message("❌ 找不到中間商服務類別，請聯繫管理員。", ephemeral=True)
+            return
+
+        # 檢查是否已有開啟的中間商工單
+        existing = discord.utils.get(
+            guild.text_channels,
+            name=f"mm-{interaction.user.name.lower().replace(' ', '-')}"
+        )
+        if existing:
+            await interaction.response.send_message(
+                f"❌ 你已經有一個開啟的中間商工單: {existing.mention}\n請先完成後再開新單。",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        admin_role = guild.get_role(ADMIN_ROLE_ID)
+        middleman_role = guild.get_role(MIDDLEMAN_ROLE_ID)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                manage_channels=True, manage_messages=True
+            )
+        }
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
+            )
+        if middleman_role:
+            overwrites[middleman_role] = discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True
+            )
+
+        ticket_channel = await guild.create_text_channel(
+            name=f"mm-{interaction.user.name.lower().replace(' ', '-')}",
+            category=category,
+            overwrites=overwrites,
+            topic=f"owner:{interaction.user.id} | 中間商工單"
+        )
+
+        # 初始化中間商工單資料（新流程：先等待 @ 對方）
+        middleman_data[ticket_channel.id] = {
+            "opener_id": interaction.user.id,
+            "invited_id": None,  # 被 @ 的人
+            "buyer_id": None,
+            "seller_id": None,
+            "buyer_payment": None,
+            "seller_payment": None,
+            "amount": None,
+            "fee": None,
+            "total": None,
+            "buyer_confirmed_role": False,
+            "seller_confirmed_role": False,
+            "buyer_agreed_rules": False,
+            "seller_agreed_rules": False,
+            "buyer_confirmed_amount": False,
+            "seller_confirmed_amount": False,
+            "payment_received": False,
+            "completed": False,
+            "phase": "invite",  # invite -> role_select -> role_confirm -> rules_agree -> amount_input -> amount_confirm -> payment -> completed
+        }
+
+        # 發送工單資訊（等待 @ 對方）
+        info_embed = discord.Embed(
+            title="🤝 中間商服務工單",
+            description=(
+                f"歡迎使用中間商服務！\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"**📋 開單資訊：**\n"
+                f"• 開單者: {interaction.user.mention}\n"
+                f"• 開單時間: <t:{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}:F>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"**👉 請 @ 你的交易對象（買家或賣家），系統將自動將對方加入此工單。**\n"
+                f"例如：@用戶名稱"
+            ),
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        info_embed.set_footer(text=f"中間商工單 ID: {ticket_channel.id}")
+        await ticket_channel.send(embed=info_embed)
+
+        # 發送結單按鈕
+        close_view = CloseTicketView()
+        await ticket_channel.send(
+            embed=discord.Embed(
+                description="管理員可使用下方按鈕結單。",
+                color=discord.Color.greyple()
+            ),
+            view=close_view
+        )
+
+        await interaction.followup.send(
+            f"✅ 中間商工單已建立！請前往 {ticket_channel.mention} 查看。",
+            ephemeral=True
+        )
 
 
 # ============================================================
@@ -2169,7 +2201,72 @@ async def on_message(message: discord.Message):
     ch_id = message.channel.id
     if ch_id in middleman_data:
         data = middleman_data[ch_id]
-        # 只在 amount_input 階段處理
+
+        # ====== invite 階段：偵測 @ 對方 ======
+        if data["phase"] == "invite":
+            # 只有開單者可以 @ 人
+            if message.author.id != data["opener_id"]:
+                return
+
+            # 檢查是否有 @ 用戶（排除機器人）
+            mentioned_users = [u for u in message.mentions if not u.bot]
+            if len(mentioned_users) == 0:
+                return  # 沒有 @ 用戶，忽略
+            if len(mentioned_users) > 1:
+                await message.channel.send("❌ 只能 @ 一個交易對象，請重新操作。")
+                return
+
+            invited_user = mentioned_users[0]
+
+            # 不能 @ 自己
+            if invited_user.id == data["opener_id"]:
+                await message.channel.send("❌ 你不能 @ 自己，請 @ 你的交易對象。")
+                return
+
+            data["invited_id"] = invited_user.id
+            data["phase"] = "role_select"
+
+            # 將被 @ 的人加入頻道權限
+            channel = message.channel
+            await channel.set_permissions(
+                invited_user,
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                embed_links=True
+            )
+
+            guild = message.guild
+            opener = guild.get_member(data["opener_id"])
+
+            invite_embed = discord.Embed(
+                title="✅ 交易對象已加入",
+                description=(
+                    f"已將 {invited_user.mention} 加入此工單。\n\n"
+                    f"**參與者：**\n"
+                    f"• {opener.mention if opener else '開單者'}\n"
+                    f"• {invited_user.mention}\n\n"
+                    f"請雙方選擇各自的角色（買家/賣家）。"
+                ),
+                color=discord.Color.green()
+            )
+            await channel.send(embed=invite_embed)
+
+            # 發送角色選擇按鈕
+            role_embed = discord.Embed(
+                title="👥 請選擇你的角色",
+                description=(
+                    "請買家和賣家分別點擊下方對應的按鈕。\n"
+                    "每個角色只能由一人選擇。\n"
+                    "如需重新選擇，請按「🔄 返回」。"
+                ),
+                color=discord.Color.blue()
+            )
+            role_view = MiddlemanRoleSelectView(ch_id)
+            await channel.send(embed=role_embed, view=role_view)
+            return
+
+        # ====== amount_input 階段：金額輸入 ======
         if data["phase"] == "amount_input":
             # 只有買家可以輸入金額
             if message.author.id != data["buyer_id"]:
@@ -2243,6 +2340,14 @@ async def on_interaction(interaction: discord.Interaction):
         return
 
     if custom_id == "mm_role_seller":
+        ch_id = interaction.channel.id
+        data = middleman_data.get(ch_id)
+        if not data:
+            await interaction.response.send_message("❌ 工單資料已遺失（機器人可能已重啟），請重新開單。", ephemeral=True)
+            return
+        return
+
+    if custom_id == "mm_role_reset":
         ch_id = interaction.channel.id
         data = middleman_data.get(ch_id)
         if not data:
@@ -2511,7 +2616,7 @@ async def setup_middleman(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     embed = discord.Embed(
-        title="🤝 中間商服務 | Middleman Service",
+        title="🤝 中間商服務 | MM Service",
         description=(
             "**歡迎使用 kny7 中間商服務！**\n\n"
             "我們提供安全可靠的中間商交易服務，\n"
@@ -2528,8 +2633,8 @@ async def setup_middleman(interaction: discord.Interaction):
             "• 所有金額另加 20 TWD 銀行轉帳費\n\n"
             "**💳 接受的付款方式：**\n"
             "• 🏦 銀行轉帳\n"
-            "• 🪙 加密貨幣\n"
-            "• 🟡 Binance Pay\n\n"
+            "• 🏧 無卡\n"
+            "• 🏧 無卡提款\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "點擊下方按鈕開始中間商交易："
         ),
