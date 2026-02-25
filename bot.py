@@ -1688,7 +1688,8 @@ class MiddlemanRoleSelectView(discord.ui.View):
             description="角色選擇已重置，請重新選擇角色。",
             color=discord.Color.red()
         )
-        await interaction.channel.send(embed=reset_embed)
+        reset_msg = await interaction.channel.send(embed=reset_embed)
+        data.setdefault("role_msg_ids", []).append(reset_msg.id)
 
         # 重新發送角色選擇
         role_embed = discord.Embed(
@@ -1701,7 +1702,8 @@ class MiddlemanRoleSelectView(discord.ui.View):
             color=discord.Color.blue()
         )
         role_view = MiddlemanRoleSelectView(interaction.channel.id)
-        await interaction.channel.send(embed=role_embed, view=role_view)
+        role_panel_msg = await interaction.channel.send(embed=role_embed, view=role_view)
+        data.setdefault("role_msg_ids", []).append(role_panel_msg.id)
 
     async def _proceed_to_role_confirm(self, channel, data):
         """雙方都選擇角色後，進入角色確認階段"""
@@ -1850,7 +1852,8 @@ class MiddlemanRoleConfirmView(discord.ui.View):
             description="角色選擇已重置，請重新選擇角色。",
             color=discord.Color.red()
         )
-        await interaction.channel.send(embed=reset_embed)
+        reset_msg = await interaction.channel.send(embed=reset_embed)
+        data.setdefault("role_msg_ids", []).append(reset_msg.id)
 
         # 重新發送角色選擇
         role_embed = discord.Embed(
@@ -1863,7 +1866,8 @@ class MiddlemanRoleConfirmView(discord.ui.View):
             color=discord.Color.blue()
         )
         role_view = MiddlemanRoleSelectView(interaction.channel.id)
-        await interaction.channel.send(embed=role_embed, view=role_view)
+        role_panel_msg = await interaction.channel.send(embed=role_embed, view=role_view)
+        data.setdefault("role_msg_ids", []).append(role_panel_msg.id)
 
     async def _proceed_to_amount(self, channel, data):
         """進入金額輸入階段"""
@@ -3079,6 +3083,15 @@ async def received_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("❌ 已經確認過收款了。", ephemeral=True)
         return
 
+    # 刪除「請輸入交易金額」系統訊息
+    for msg_id in data.get("amount_msg_ids", []):
+        try:
+            msg = await interaction.channel.fetch_message(msg_id)
+            await msg.delete()
+        except Exception:
+            pass
+    data["amount_msg_ids"] = []
+
     # 第一次確認
     guild = interaction.guild
     seller = guild.get_member(data["seller_id"]) if data.get("seller_id") else None
@@ -3091,7 +3104,7 @@ async def received_cmd(interaction: discord.Interaction):
             f"**手續費:** {data['fee']:.0f} TWD\n"
             f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
             f"**買家支付總額:** {data['total']:.0f} TWD\n\n"
-            f"您確定已經確定收到賣家的物品了嗎？\n\n"
+            f"您確定已經確定收到賣家的物品了嗎？\n"
             f"# 此操作無法撤銷，點擊後即為收到物品且無任何爭議（擔保由賣家 {seller_mention} 負責，與本伺服器無任何關聯），本次交易金額將立即放款給賣家，請知悉這點"
         ),
         color=discord.Color.orange()
@@ -3124,12 +3137,17 @@ class MiddlemanReceivedConfirmView(discord.ui.View):
             return
 
         # 第二次確認
+        guild = interaction.guild
+        seller = guild.get_member(data.get("seller_id")) if data.get("seller_id") else None
+        seller_mention = seller.mention if seller else ''
+
         confirm2_embed = discord.Embed(
             title="⚠️ 最終確認放款",
             description=(
-                f"**你即將確認放款給賣家。**\n\n"
+                f"你即將確認放款給賣家\n"
                 f"**交易金額:** {data['amount']:.0f} TWD\n"
-                f"**此操作無法撤銷，請再次確認。**"
+                f"此操作無法撤銷，請再次確認\n"
+                f"# 此操作無法撤銷，點擊後即為收到物品且無任何爭議（擔保由賣家 {seller_mention} 負責，與本伺服器無任何關聯），本次交易金額將立即放款給賣家，請知悉這點"
             ),
             color=discord.Color.red()
         )
@@ -3223,7 +3241,7 @@ class MiddlemanFinalConfirmView(discord.ui.View):
         seller_payment_embed = discord.Embed(
             title="💰 請賣家選擇收款方式",
             description=(
-                f"買家 {buyer.mention if buyer else ''} 已確認收到貨，準備放款金額\n"
+                f"買家 {buyer.mention if buyer else ''} 已確認收到貨，準備放款金額至賣家\n"
                 f"**放款金額：** {data['amount']:.0f} 台幣\n\n"
                 f"請 **賣家** {seller.mention if seller else ''} 從下方選單選擇收款方式\n\n"
                 f"選擇完成後，將進行放款\n"
