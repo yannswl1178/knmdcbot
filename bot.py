@@ -1888,7 +1888,8 @@ class MiddlemanRoleConfirmView(discord.ui.View):
             ),
             color=discord.Color.blue()
         )
-        await channel.send(embed=amount_embed)
+        amount_input_msg = await channel.send(embed=amount_embed)
+        data["amount_msg_ids"].append(amount_input_msg.id)
 
 
 class MiddlemanRulesAgreeView(discord.ui.View):
@@ -1973,7 +1974,10 @@ class MiddlemanRulesAgreeView(discord.ui.View):
             ),
             color=discord.Color.gold()
         )
-        await channel.send(embed=payment_embed)
+        payment_msg = await channel.send(embed=payment_embed)
+        # 追蹤「請買家匯款」訊息 ID，用於確認收款後刪除
+        data.setdefault("payment_msg_id", None)
+        data["payment_msg_id"] = payment_msg.id
 
 
 class MiddlemanAmountConfirmView(discord.ui.View):
@@ -2416,6 +2420,9 @@ async def on_message(message: discord.Message):
                     ),
                     color=discord.Color.green()
                 )
+                # 追蹤買家輸入金額的訊息 ID（用於刪除）
+                data["amount_msg_ids"].append(message.id)
+
                 view = MiddlemanAmountConfirmView(ch_id)
                 amount_msg = await message.channel.send(embed=amount_embed, view=view)
                 data["amount_msg_ids"].append(amount_msg.id)
@@ -3073,6 +3080,10 @@ async def received_cmd(interaction: discord.Interaction):
         return
 
     # 第一次確認
+    guild = interaction.guild
+    seller = guild.get_member(data["seller_id"]) if data.get("seller_id") else None
+    seller_mention = seller.mention if seller else ''
+
     confirm_embed = discord.Embed(
         title="⚠️ 確認收款",
         description=(
@@ -3080,8 +3091,8 @@ async def received_cmd(interaction: discord.Interaction):
             f"**手續費:** {data['fee']:.0f} TWD\n"
             f"**銀行轉帳費:** {BANK_TRANSFER_FEE} TWD\n"
             f"**買家支付總額:** {data['total']:.0f} TWD\n\n"
-            f"你確定已收到買家的匯款嗎？\n"
-            f"**此操作無法撤銷。**"
+            f"您確定已經確定收到賣家的物品了嗎？\n\n"
+            f"# 此操作無法撤銷，點擊後即為收到物品且無任何爭議（擔保由賣家 {seller_mention} 負責，與本伺服器無任何關聯），本次交易金額將立即放款給賣家，請知悉這點"
         ),
         color=discord.Color.orange()
     )
@@ -3097,13 +3108,15 @@ class MiddlemanReceivedConfirmView(discord.ui.View):
 
     @discord.ui.button(label="✅ 確認已收款", style=discord.ButtonStyle.success, custom_id="mm_received_confirm")
     async def confirm_received(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_boss(interaction.user) and not is_middleman(interaction.user):
-            await interaction.response.send_message("❌ 僅老闆或中間mm可操作。", ephemeral=True)
-            return
-
         data = middleman_data.get(self.channel_id or interaction.channel.id)
         if not data:
             await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        # 買家、老闆、中間MM 都可以點擊確認已收款
+        is_buyer = interaction.user.id == data.get("buyer_id")
+        if not is_buyer and not is_boss(interaction.user) and not is_middleman(interaction.user):
+            await interaction.response.send_message("❌ 僅買家、老闆或中間MM可操作。", ephemeral=True)
             return
 
         if data["payment_received"]:
@@ -3135,10 +3148,17 @@ class MiddlemanReceivedConfirmView(discord.ui.View):
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary, custom_id="mm_received_cancel")
     async def cancel_received(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send("✅ 已取消收款確認。", ephemeral=True)
+        # 僅老闆/中間MM 可以取消
+        if not is_boss(interaction.user) and not is_middleman(interaction.user):
+            await interaction.response.send_message("❌ 僅老闆或中間MM可取消。", ephemeral=True)
+            return
+        # 刪除該確認收款訊息
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+        # 提示買家重新提交匯款明細
+        await interaction.channel.send("⚠️ 由於老闆/中間MM 誤發，導致顯示錯誤，請買家重新提交匯款明細。")
 
 
 class MiddlemanFinalConfirmView(discord.ui.View):
@@ -3185,17 +3205,29 @@ class MiddlemanFinalConfirmView(discord.ui.View):
             pass
         data["received_msg_ids"] = []
 
+        # 刪除「請買家匯款」訊息
+        payment_msg_id = data.get("payment_msg_id")
+        if payment_msg_id:
+            try:
+                payment_msg = await channel.fetch_message(payment_msg_id)
+                await payment_msg.delete()
+            except Exception:
+                pass
+            data["payment_msg_id"] = None
+
         guild = interaction.guild
+        buyer = guild.get_member(data["buyer_id"]) if data.get("buyer_id") else None
         seller = guild.get_member(data["seller_id"]) if data["seller_id"] else None
 
         # 要求賣家選擇收款方式
         seller_payment_embed = discord.Embed(
             title="💰 請賣家選擇收款方式",
             description=(
-                f"已確認收款並準備放款。\n\n"
-                f"請 **賣家** {seller.mention if seller else ''} 從下方選單選擇收款方式。\n\n"
-                f"選擇完成後，老闆/中間MM 將進行放款，\n"
-                f"並使用 `/done-money` 命令完成交易。"
+                f"買家 {buyer.mention if buyer else ''} 已確認收到貨，準備放款金額\n"
+                f"**放款金額：** {data['amount']:.0f} 台幣\n\n"
+                f"請 **賣家** {seller.mention if seller else ''} 從下方選單選擇收款方式\n\n"
+                f"選擇完成後，將進行放款\n"
+                f"老闆/中間MM 將使用 `/done-money` 命令完成本次交易"
             ),
             color=discord.Color.blue()
         )
