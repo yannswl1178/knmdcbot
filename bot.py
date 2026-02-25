@@ -1762,7 +1762,7 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 ephemeral=False
             )
 
-        # 雙方都確認 → 進入金額輸入階段
+        # 雙方都確認 → 先顯示角色確認摘要，再進入金額輸入階段
         if data["buyer_confirmed_role"] and data["seller_confirmed_role"]:
             for child in self.children:
                 child.disabled = True
@@ -1770,6 +1770,21 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 await interaction.message.edit(view=self)
             except Exception:
                 pass
+
+            # 發送角色確認摘要
+            guild = interaction.guild
+            buyer = guild.get_member(data["buyer_id"])
+            seller = guild.get_member(data["seller_id"])
+            summary_embed = discord.Embed(
+                title="✅ 角色確認",
+                description=(
+                    f"買家: {buyer.mention if buyer else '未知'}\n"
+                    f"賣家: {seller.mention if seller else '未知'}"
+                ),
+                color=discord.Color.green()
+            )
+            await interaction.channel.send(embed=summary_embed)
+
             data["phase"] = "amount_input"
             await self._proceed_to_amount(interaction.channel, data)
 
@@ -1842,111 +1857,71 @@ class MiddlemanRoleConfirmView(discord.ui.View):
         await channel.send(embed=amount_embed)
 
 
-class MiddlemanBuyerRulesView(discord.ui.View):
-    """中間商規則同意 — 買家規則（先顯示）"""
-    def __init__(self, channel_id: int):
+class MiddlemanRulesAgreeView(discord.ui.View):
+    """中間商規則同意 — 買家和賣家誰先同意都可以"""
+    def __init__(self, channel_id: int, role: str):
         super().__init__(timeout=None)
         self.channel_id = channel_id
+        self.role = role  # "buyer" or "seller"
+        # 動態設定 custom_id
+        self.children[0].custom_id = f"mm_{role}_rules_agree"
 
-    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success, custom_id="mm_buyer_rules_agree")
-    async def buyer_agree(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success)
+    async def agree_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = middleman_data.get(self.channel_id or interaction.channel.id)
         if not data:
             await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
             return
 
-        if interaction.user.id != data["buyer_id"]:
-            await interaction.response.send_message("❌ 只有買家可以操作此按鈕。", ephemeral=True)
-            return
+        user_id = interaction.user.id
 
-        if data["buyer_agreed_rules"]:
-            await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
-            return
+        if self.role == "buyer":
+            if user_id != data["buyer_id"]:
+                await interaction.response.send_message("❌ 只有買家可以操作此按鈕。", ephemeral=True)
+                return
+            if data["buyer_agreed_rules"]:
+                await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
+                return
+            data["buyer_agreed_rules"] = True
+        elif self.role == "seller":
+            if user_id != data["seller_id"]:
+                await interaction.response.send_message("❌ 只有賣家可以操作此按鈕。", ephemeral=True)
+                return
+            if data["seller_agreed_rules"]:
+                await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
+                return
+            data["seller_agreed_rules"] = True
 
-        data["buyer_agreed_rules"] = True
-
-        # 禁用買家按鈕
+        # 禁用按鈕
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        # 追蹤買家規則訊息 ID（用於後續刪除）
+        # 追蹤規則訊息 ID
         data["rules_msg_ids"].append(interaction.message.id)
 
-        # 現在顯示賣家規則
-        guild = interaction.guild
-        seller = guild.get_member(data["seller_id"])
-        rules_url = "https://ptb.discord.com/channels/1464245186954526793/1475397009837133876"
+        # 檢查雙方是否都同意
+        if data["buyer_agreed_rules"] and data["seller_agreed_rules"]:
+            channel = interaction.channel
+            # 刪除金額明細相關訊息（包含確認回覆）
+            for msg_id in data.get("amount_msg_ids", []):
+                try:
+                    msg = await channel.fetch_message(msg_id)
+                    await msg.delete()
+                except Exception:
+                    pass
+            # 刪除規則相關訊息
+            for msg_id in data.get("rules_msg_ids", []):
+                try:
+                    msg = await channel.fetch_message(msg_id)
+                    await msg.delete()
+                except Exception:
+                    pass
+            data["rules_msg_ids"] = []
+            data["amount_msg_ids"] = []
 
-        seller_rules_embed = discord.Embed(
-            title="📜 賣家服務規則",
-            description=(
-                f"買家已同意規則。\n\n"
-                f"請 **賣家** {seller.mention if seller else ''} 閱讀並同意中間商服務規則。\n\n"
-                f"📖 **規則連結:** [點擊查看規則]({rules_url})\n\n"
-                f"請按下方「✅ 我同意規則」按鈕。"
-            ),
-            color=discord.Color.gold()
-        )
-        seller_view = MiddlemanSellerRulesView(interaction.channel.id)
-        seller_msg = await interaction.channel.send(embed=seller_rules_embed, view=seller_view)
-        data["rules_msg_ids"].append(seller_msg.id)
-
-
-class MiddlemanSellerRulesView(discord.ui.View):
-    """中間商規則同意 — 賣家規則（買家同意後才顯示）"""
-    def __init__(self, channel_id: int):
-        super().__init__(timeout=None)
-        self.channel_id = channel_id
-
-    @discord.ui.button(label="✅ 我同意規則", style=discord.ButtonStyle.success, custom_id="mm_seller_rules_agree")
-    async def seller_agree(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = middleman_data.get(self.channel_id or interaction.channel.id)
-        if not data:
-            await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
-            return
-
-        if interaction.user.id != data["seller_id"]:
-            await interaction.response.send_message("❌ 只有賣家可以操作此按鈕。", ephemeral=True)
-            return
-
-        if data["seller_agreed_rules"]:
-            await interaction.response.send_message("❌ 你已經同意過了。", ephemeral=True)
-            return
-
-        data["seller_agreed_rules"] = True
-
-        # 禁用賣家按鈕
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(view=self)
-
-        # 雙方都同意 → 先刪除金額明細訊息，再刪除規則訊息
-        channel = interaction.channel
-        # 刪除金額明細相關訊息（包含確認回覆）
-        for msg_id in data.get("amount_msg_ids", []):
-            try:
-                msg = await channel.fetch_message(msg_id)
-                await msg.delete()
-            except Exception:
-                pass
-        # 刪除規則相關訊息（包含買家規則和賣家規則）
-        for msg_id in data.get("rules_msg_ids", []):
-            try:
-                msg = await channel.fetch_message(msg_id)
-                await msg.delete()
-            except Exception:
-                pass
-        # 刪除當前賣家規則訊息本身（interaction.message）
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-        data["rules_msg_ids"] = []
-        data["amount_msg_ids"] = []
-
-        data["phase"] = "payment"
-        await self._proceed_to_payment(channel, data)
+            data["phase"] = "payment"
+            await self._proceed_to_payment(channel, data)
 
     async def _proceed_to_payment(self, channel, data):
         """進入付款階段"""
@@ -2033,11 +2008,13 @@ class MiddlemanAmountConfirmView(discord.ui.View):
             await self._proceed_to_rules(interaction.channel, data)
 
     async def _proceed_to_rules(self, channel, data):
-        """進入規則同意階段 — 先顯示買家規則"""
+        """進入規則同意階段 — 同時顯示買家和賣家規則（誰先同意都可以）"""
         rules_url = "https://ptb.discord.com/channels/1464245186954526793/1475397009837133876"
         guild = channel.guild
         buyer = guild.get_member(data["buyer_id"])
+        seller = guild.get_member(data["seller_id"])
 
+        # 買家規則
         buyer_rules_embed = discord.Embed(
             title="📜 買家服務規則",
             description=(
@@ -2047,9 +2024,23 @@ class MiddlemanAmountConfirmView(discord.ui.View):
             ),
             color=discord.Color.gold()
         )
-        buyer_view = MiddlemanBuyerRulesView(channel.id)
+        buyer_view = MiddlemanRulesAgreeView(channel.id, "buyer")
         buyer_msg = await channel.send(embed=buyer_rules_embed, view=buyer_view)
         data["rules_msg_ids"].append(buyer_msg.id)
+
+        # 賣家規則
+        seller_rules_embed = discord.Embed(
+            title="📜 賣家服務規則",
+            description=(
+                f"請 **賣家** {seller.mention if seller else ''} 閱讀並同意中間商服務規則。\n\n"
+                f"📖 **規則連結:** [點擊查看規則]({rules_url})\n\n"
+                f"請按下方「✅ 我同意規則」按鈕。"
+            ),
+            color=discord.Color.gold()
+        )
+        seller_view = MiddlemanRulesAgreeView(channel.id, "seller")
+        seller_msg = await channel.send(embed=seller_rules_embed, view=seller_view)
+        data["rules_msg_ids"].append(seller_msg.id)
 
     @discord.ui.button(label="重新輸入金額", style=discord.ButtonStyle.secondary, custom_id="mm_amount_reset")
     async def reset_amount(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2245,6 +2236,8 @@ async def on_ready():
     bot.add_view(InquiryTicketView())
     bot.add_view(InquiryAdminView())
     bot.add_view(MiddlemanOpenView())
+    bot.add_view(MiddlemanRulesAgreeView(0, "buyer"))
+    bot.add_view(MiddlemanRulesAgreeView(0, "seller"))
     bot.add_view(MiddlemanSellerPaymentView(0))
 
     # 為已存在的中間商工單重新註冊 view
@@ -3646,6 +3639,8 @@ async def refresh_bot(interaction: discord.Interaction):
         bot.add_view(InquiryTicketView())
         bot.add_view(InquiryAdminView())
         bot.add_view(MiddlemanOpenView())
+        bot.add_view(MiddlemanRulesAgreeView(0, "buyer"))
+        bot.add_view(MiddlemanRulesAgreeView(0, "seller"))
         bot.add_view(MiddlemanSellerPaymentView(0))
 
         # 同步命令
