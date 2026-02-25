@@ -1605,10 +1605,13 @@ class MiddlemanRoleSelectView(discord.ui.View):
             await self._proceed_to_role_confirm(interaction.channel, data)
         else:
             await interaction.response.edit_message(view=self)
-            await interaction.followup.send(
+            role_msg = await interaction.followup.send(
                 f"✅ {interaction.user.mention} 已選擇 **買家** 角色。等待對方選擇...",
-                ephemeral=False
+                ephemeral=False,
+                wait=True
             )
+            if role_msg:
+                data.setdefault("role_msg_ids", []).append(role_msg.id)
 
     @discord.ui.button(label="💰 我是賣家", style=discord.ButtonStyle.success, custom_id="mm_role_seller")
     async def select_seller(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1647,10 +1650,13 @@ class MiddlemanRoleSelectView(discord.ui.View):
             await self._proceed_to_role_confirm(interaction.channel, data)
         else:
             await interaction.response.edit_message(view=self)
-            await interaction.followup.send(
+            role_msg = await interaction.followup.send(
                 f"✅ {interaction.user.mention} 已選擇 **賣家** 角色。等待對方選擇...",
-                ephemeral=False
+                ephemeral=False,
+                wait=True
             )
+            if role_msg:
+                data.setdefault("role_msg_ids", []).append(role_msg.id)
 
     @discord.ui.button(label="🔄 返回", style=discord.ButtonStyle.danger, custom_id="mm_role_reset")
     async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1716,7 +1722,8 @@ class MiddlemanRoleSelectView(discord.ui.View):
             color=discord.Color.orange()
         )
         view = MiddlemanRoleConfirmView(channel.id)
-        await channel.send(embed=confirm_embed, view=view)
+        confirm_msg = await channel.send(embed=confirm_embed, view=view)
+        data.setdefault("role_msg_ids", []).append(confirm_msg.id)
 
 
 class MiddlemanRoleConfirmView(discord.ui.View):
@@ -1749,6 +1756,12 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 f"✅ 買家 {interaction.user.mention} 已確認角色正確。等待賣家確認...",
                 ephemeral=False
             )
+            # 追蹤確認訊息 ID
+            try:
+                confirm_reply = await interaction.original_response()
+                data.setdefault("role_msg_ids", []).append(confirm_reply.id)
+            except Exception:
+                pass
         elif user_id == data["seller_id"]:
             if not data["buyer_confirmed_role"]:
                 await interaction.response.send_message("❌ 請等待買家先確認角色。", ephemeral=True)
@@ -1761,8 +1774,14 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 f"✅ 賣家 {interaction.user.mention} 已確認角色正確。",
                 ephemeral=False
             )
+            # 追蹤確認訊息 ID
+            try:
+                confirm_reply = await interaction.original_response()
+                data.setdefault("role_msg_ids", []).append(confirm_reply.id)
+            except Exception:
+                pass
 
-        # 雙方都確認 → 先顯示角色確認摘要，再進入金額輸入階段
+        # 雙方都確認 → 刪除所有角色相關訊息，再顯示角色確認摘要，再進入金額輸入階段
         if data["buyer_confirmed_role"] and data["seller_confirmed_role"]:
             for child in self.children:
                 child.disabled = True
@@ -1770,6 +1789,21 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 await interaction.message.edit(view=self)
             except Exception:
                 pass
+
+            # 刪除所有角色選擇/確認相關訊息
+            channel = interaction.channel
+            for msg_id in data.get("role_msg_ids", []):
+                try:
+                    msg = await channel.fetch_message(msg_id)
+                    await msg.delete()
+                except Exception:
+                    pass
+            # 也刪除角色確認 embed 本身
+            try:
+                await interaction.message.delete()
+            except Exception:
+                pass
+            data["role_msg_ids"] = []
 
             # 發送角色確認摘要
             guild = interaction.guild
@@ -1783,10 +1817,10 @@ class MiddlemanRoleConfirmView(discord.ui.View):
                 ),
                 color=discord.Color.green()
             )
-            await interaction.channel.send(embed=summary_embed)
+            await channel.send(embed=summary_embed)
 
             data["phase"] = "amount_input"
-            await self._proceed_to_amount(interaction.channel, data)
+            await self._proceed_to_amount(channel, data)
 
     @discord.ui.button(label="❌ 角色不正確", style=discord.ButtonStyle.danger, custom_id="mm_role_confirm_no")
     async def confirm_no(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2172,6 +2206,8 @@ class MiddlemanOpenView(discord.ui.View):
             "phase": "invite",
             "amount_msg_ids": [],  # 金額明細相關訊息 ID（用於刪除）
             "rules_msg_ids": [],   # 規則相關訊息 ID（用於刪除）
+            "role_msg_ids": [],    # 角色選擇/確認相關訊息 ID（用於刪除）
+            "received_msg_ids": [], # 確認收款/最終確認放款訊息 ID（用於刪除）
             "received_done": False,  # /received 是否已執行
         }
 
@@ -2337,7 +2373,8 @@ async def on_message(message: discord.Message):
                 color=discord.Color.blue()
             )
             role_view = MiddlemanRoleSelectView(ch_id)
-            await channel.send(embed=role_embed, view=role_view)
+            role_panel_msg = await channel.send(embed=role_embed, view=role_view)
+            data.setdefault("role_msg_ids", []).append(role_panel_msg.id)
             return
 
         # ====== amount_input 階段：金額輸入 ======
@@ -3088,7 +3125,13 @@ class MiddlemanReceivedConfirmView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
-        await interaction.channel.send(embed=confirm2_embed, view=view)
+
+        # 追蹤確認收款 embed 訊息 ID（即 interaction.message）
+        data.setdefault("received_msg_ids", []).append(interaction.message.id)
+
+        final_msg = await interaction.channel.send(embed=confirm2_embed, view=view)
+        # 追蹤最終確認放款 embed 訊息 ID
+        data.setdefault("received_msg_ids", []).append(final_msg.id)
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary, custom_id="mm_received_cancel")
     async def cancel_received(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3126,6 +3169,21 @@ class MiddlemanFinalConfirmView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
+
+        # 刪除確認收款和最終確認放款的 embed 訊息
+        channel = interaction.channel
+        for msg_id in data.get("received_msg_ids", []):
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.delete()
+            except Exception:
+                pass
+        # 也刪除最終確認放款 embed 本身
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+        data["received_msg_ids"] = []
 
         guild = interaction.guild
         seller = guild.get_member(data["seller_id"]) if data["seller_id"] else None
@@ -3298,6 +3356,13 @@ async def done_money(interaction: discord.Interaction):
         # 設定 @everyone 不能發言
         everyone_role = guild.default_role
         await channel.set_permissions(everyone_role, send_messages=False)
+
+        # 對買家和賣家個別設定禁止發言（覆寫先前的個人權限）
+        if buyer:
+            await channel.set_permissions(buyer, send_messages=False, read_messages=True)
+        if seller:
+            await channel.set_permissions(seller, send_messages=False, read_messages=True)
+
         # 確保老闆和中間MM 身分組仍可發言
         boss_role = guild.get_role(BOSS_ROLE_ID)
         mm_role = guild.get_role(MIDDLEMAN_ROLE_ID)
