@@ -1792,19 +1792,30 @@ class MiddlemanRoleConfirmView(discord.ui.View):
             except Exception:
                 pass
 
-            # 刪除所有角色選擇/確認相關訊息
+            # 刪除所有角色選擇/確認相關訊息（一次性批量刪除）
             channel = interaction.channel
+            msgs_to_delete = []
             for msg_id in data.get("role_msg_ids", []):
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    await msg.delete()
+                    msgs_to_delete.append(msg)
                 except Exception:
                     pass
             # 也刪除角色確認 embed 本身
             try:
-                await interaction.message.delete()
+                msgs_to_delete.append(interaction.message)
             except Exception:
                 pass
+            if msgs_to_delete:
+                try:
+                    await channel.delete_messages(msgs_to_delete)
+                except Exception:
+                    # 如果批量刪除失敗（訊息超過14天），逐一刪除
+                    for m in msgs_to_delete:
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
             data["role_msg_ids"] = []
 
             # 發送角色確認摘要
@@ -1942,20 +1953,23 @@ class MiddlemanRulesAgreeView(discord.ui.View):
         # 檢查雙方是否都同意
         if data["buyer_agreed_rules"] and data["seller_agreed_rules"]:
             channel = interaction.channel
-            # 刪除金額明細相關訊息（包含確認回覆）
-            for msg_id in data.get("amount_msg_ids", []):
+            # 一次性批量刪除金額明細和規則相關訊息
+            msgs_to_delete = []
+            for msg_id in data.get("amount_msg_ids", []) + data.get("rules_msg_ids", []):
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    await msg.delete()
+                    msgs_to_delete.append(msg)
                 except Exception:
                     pass
-            # 刪除規則相關訊息
-            for msg_id in data.get("rules_msg_ids", []):
+            if msgs_to_delete:
                 try:
-                    msg = await channel.fetch_message(msg_id)
-                    await msg.delete()
+                    await channel.delete_messages(msgs_to_delete)
                 except Exception:
-                    pass
+                    for m in msgs_to_delete:
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
             data["rules_msg_ids"] = []
             data["amount_msg_ids"] = []
 
@@ -2283,6 +2297,8 @@ async def on_ready():
     bot.add_view(MiddlemanRulesAgreeView(0, "buyer"))
     bot.add_view(MiddlemanRulesAgreeView(0, "seller"))
     bot.add_view(MiddlemanSellerPaymentView(0))
+    bot.add_view(MiddlemanReceivedConfirmView(0))
+    bot.add_view(MiddlemanFinalConfirmView(0))
 
     # 為已存在的中間商工單重新註冊 view
     # （重啟後 middleman_data 會清空，但按鈕的 custom_id 是固定的，
@@ -3083,13 +3099,23 @@ async def received_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("❌ 已經確認過收款了。", ephemeral=True)
         return
 
-    # 刪除「請輸入交易金額」系統訊息
+    # 一次性批量刪除「請輸入交易金額」系統訊息
+    msgs_to_delete = []
     for msg_id in data.get("amount_msg_ids", []):
         try:
             msg = await interaction.channel.fetch_message(msg_id)
-            await msg.delete()
+            msgs_to_delete.append(msg)
         except Exception:
             pass
+    if msgs_to_delete:
+        try:
+            await interaction.channel.delete_messages(msgs_to_delete)
+        except Exception:
+            for m in msgs_to_delete:
+                try:
+                    await m.delete()
+                except Exception:
+                    pass
     data["amount_msg_ids"] = []
 
     # 第一次確認
@@ -3116,7 +3142,7 @@ async def received_cmd(interaction: discord.Interaction):
 class MiddlemanReceivedConfirmView(discord.ui.View):
     """中間商收款確認（兩次確認）"""
     def __init__(self, channel_id: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.channel_id = channel_id
 
     @discord.ui.button(label="✅ 確認已收款", style=discord.ButtonStyle.success, custom_id="mm_received_confirm")
@@ -3182,18 +3208,20 @@ class MiddlemanReceivedConfirmView(discord.ui.View):
 class MiddlemanFinalConfirmView(discord.ui.View):
     """中間商最終放款確認"""
     def __init__(self, channel_id: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.channel_id = channel_id
 
     @discord.ui.button(label="✅ 確認放款", style=discord.ButtonStyle.danger, custom_id="mm_final_confirm")
     async def final_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_boss(interaction.user) and not is_middleman(interaction.user):
-            await interaction.response.send_message("❌ 僅老闆或中間mm可操作。", ephemeral=True)
-            return
-
         data = middleman_data.get(self.channel_id or interaction.channel.id)
         if not data:
             await interaction.response.send_message("❌ 找不到工單資料。", ephemeral=True)
+            return
+
+        # 買家、老闆、中間MM 都可以點擊確認放款
+        is_buyer = interaction.user.id == data.get("buyer_id")
+        if not is_buyer and not is_boss(interaction.user) and not is_middleman(interaction.user):
+            await interaction.response.send_message("❌ 僅買家、老闆或中間MM可操作。", ephemeral=True)
             return
 
         if data["payment_received"]:
@@ -3208,30 +3236,39 @@ class MiddlemanFinalConfirmView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        # 刪除確認收款和最終確認放款的 embed 訊息
+        # 一次性批量刪除確認收款、最終確認放款、請買家匯款等訊息
         channel = interaction.channel
+        msgs_to_delete = []
         for msg_id in data.get("received_msg_ids", []):
             try:
                 msg = await channel.fetch_message(msg_id)
-                await msg.delete()
+                msgs_to_delete.append(msg)
             except Exception:
                 pass
         # 也刪除最終確認放款 embed 本身
         try:
-            await interaction.message.delete()
+            msgs_to_delete.append(interaction.message)
         except Exception:
             pass
-        data["received_msg_ids"] = []
-
         # 刪除「請買家匯款」訊息
         payment_msg_id = data.get("payment_msg_id")
         if payment_msg_id:
             try:
                 payment_msg = await channel.fetch_message(payment_msg_id)
-                await payment_msg.delete()
+                msgs_to_delete.append(payment_msg)
             except Exception:
                 pass
-            data["payment_msg_id"] = None
+        if msgs_to_delete:
+            try:
+                await channel.delete_messages(msgs_to_delete)
+            except Exception:
+                for m in msgs_to_delete:
+                    try:
+                        await m.delete()
+                    except Exception:
+                        pass
+        data["received_msg_ids"] = []
+        data["payment_msg_id"] = None
 
         guild = interaction.guild
         buyer = guild.get_member(data["buyer_id"]) if data.get("buyer_id") else None
@@ -3757,6 +3794,8 @@ async def refresh_bot(interaction: discord.Interaction):
         bot.add_view(MiddlemanRulesAgreeView(0, "buyer"))
         bot.add_view(MiddlemanRulesAgreeView(0, "seller"))
         bot.add_view(MiddlemanSellerPaymentView(0))
+        bot.add_view(MiddlemanReceivedConfirmView(0))
+        bot.add_view(MiddlemanFinalConfirmView(0))
 
         # 同步命令
         synced = await bot.tree.sync(guild=interaction.guild)
